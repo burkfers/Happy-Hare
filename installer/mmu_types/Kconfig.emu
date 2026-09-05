@@ -67,6 +67,12 @@ endif
 
 if MMU_TYPE_EMU_1_0
 
+  # Must stay above the 'source "Kconfig.mmu_additions"' below: the first
+  # satisfied 'config/default' pair wins, so this precedes (and overrides)
+  # the base defaults in Kconfig.leds for EMU units.
+  config PARAM_LED_THEME
+    default "emu_leds"
+
   source "Kconfig.num_gates"
 
   if SHOW_MMU_ADDITIONS_WITH_TYPE
