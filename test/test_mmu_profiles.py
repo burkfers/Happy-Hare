@@ -926,3 +926,54 @@ class TestLedThemes(unittest.TestCase):
         self.assertNotIn('include', section)
         self.assertFalse(any(o.startswith('include') for o in parser.defaults()))
 
+    def test_emu_profile_includes_the_vendor_theme(self):
+        rendered = self._rendered('emu')
+
+        hardware = [v for k, v in rendered.items() if k.startswith('config/base/mmu_hardware')]
+        includes = [l.strip() for l in hardware[0].splitlines() if l.startswith('[include ')]
+        self.assertEqual(includes, ['[include ../led_theme/emu_leds_unit0.cfg]'])
+
+        from test.hh import cfg
+        parser = cfg.assemble(rendered)
+        section = dict(parser.items('mmu_leds unit0'))
+        self.assertEqual(section['effect_gate_available'].split(',')[0], 'mmu_static_white_dim')
+        self.assertIn('(0.3, 0.3, 0.3)', section['effect_gate_available'])
+        self.assertEqual(section['effect_gate_available_sel'].split(',')[0], 'mmu_static_white')
+        self.assertIn('(0.75, 0.75, 0.75)', section['effect_gate_available_sel'])
+        self.assertEqual(section['effect_gate_empty_sel'].split(',')[0], 'mmu_static_red')
+        self.assertIn('(0.2, 0, 0)', section['effect_gate_empty_sel'])
+        # The rest of the vendor theme is the stock set, so only those three differ. The
+        # comparison must be whitespace-insensitive for the same re-alignment reason as above.
+        stock = cfg.assemble(self._rendered('boxturtle'))
+        stock_section = dict(stock.items('mmu_leds unit0'))
+
+        def canonical(value):
+            return re.sub(r'\s+', ' ', value).strip()
+
+        differing = {o for o in stock_section
+                     if o.startswith('effect_')
+                     and canonical(stock_section[o]) != canonical(section[o])}
+        self.assertEqual(differing, {'effect_gate_available', 'effect_gate_available_sel',
+                                     'effect_gate_empty_sel'})
+
+        # The vendor theme references the basic effects by name; they are DEFINED once in
+        # mmu.cfg and never redefined by a theme.
+        for name in ('mmu_static_white', 'mmu_static_white_dim', 'mmu_static_red'):
+            self.assertTrue(parser.has_section('mmu_led_effect %s' % name), name)
+        for k, v in rendered.items():
+            if k.startswith('config/led_theme/'):
+                self.assertFalse(any(l.startswith('[mmu_led_effect') for l in v.splitlines()),
+                                 'theme %s redefines effects' % k)
+
+    def test_selected_theme_survives_a_boot(self):
+        """The EMU boot must not trip on the split section (it used to be one file)."""
+        hh = session('emu')
+        try:
+            hh.boot()
+            self.assertEqual(hh.errors, [])
+        finally:
+            hh.close()
+
+
+if __name__ == '__main__':
+    unittest.main()
