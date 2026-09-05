@@ -205,13 +205,34 @@ hh_moonraker_components := $(wildcard components/*.py)
 # upgrade-path placeholders, see config/base/README.md) are deliberately excluded here:
 # $(wildcard) can't test size, so use find -size +0c instead, or every fresh install
 # would build and install those empty stubs as real (if empty) config files.
+#
+# config/led_theme/*.cfg are per-unit templates only (see hh_unit_config_files below):
+# they are included from the unit's hardware file, never globbed from printer.cfg.
 repo_cfgs := \
-	$(patsubst config/%,%, $(shell find config -mindepth 1 -maxdepth 2 -name '*.cfg' -size +0c))
+	$(filter-out led_theme/%,$(patsubst config/%,%, $(shell find config -mindepth 1 -maxdepth 2 -name '*.cfg' -size +0c)))
 
-# Per-unit files: <unit>_{hardware,parameters}.cfg
+# Shipped LED theme templates (config/led_theme/<theme>.cfg), rendered once per unit
+led_theme_names := $(basename $(notdir $(wildcard $(SRC)/config/led_theme/*.cfg)))
+
+# Theme a unit selected in menuconfig (Kconfig PARAM_LED_THEME, read from the unit's
+# values file; the value may carry a trailing comment, e.g. the #~DEFAULT~# marker).
+led_theme_of = $(strip $(subst ",,$(shell sed -n 's/^CONFIG_PARAM_LED_THEME=//p' $(1) 2>/dev/null | sed 's/#.*//')))
+
+# LED theme files to build/install per unit: only the selected one, if it is known and
+# shipped ('custom' and user-maintained themes are machine-local, units without LEDs
+# get none); all shipped themes while the values file is missing - first run, where
+# menuconfig runs mid-build, and the install step prunes to the real selection.
+led_theme_files_for = $(if $(wildcard $(2)), \
+	$(filter $(led_theme_names),$(call led_theme_of,$(2))), \
+	$(led_theme_names))
+
+# Per-unit files: <unit>_{hardware,parameters}.cfg and the LED theme files
+# (<theme>_<unit>.cfg; the unit's hardware file includes the one selected by Kconfig
+# PARAM_LED_THEME)
 hh_unit_config_files := \
 	$(addprefix base/mmu_hardware_,$(addsuffix .cfg,$(unit_names))) \
-	$(addprefix base/mmu_parameters_,$(addsuffix .cfg,$(unit_names)))
+	$(addprefix base/mmu_parameters_,$(addsuffix .cfg,$(unit_names))) \
+	$(foreach u,$(unit_names),$(addprefix led_theme/,$(addsuffix _$(u).cfg,$(call led_theme_files_for,$(u),$(if $(filter y,$(CONFIG_MULTI_UNIT)),$(KCONFIG_CONFIG)_$(u),$(KCONFIG_CONFIG))))))
 
 # Final config set: all repo cfgs (minus the single-unit defaults) + per-unit files
 hh_config_files := \
@@ -220,13 +241,22 @@ hh_config_files := \
 
 # Look for installed configs that would need be parsed by the build script
 # This allows for easy upgrades and option movement across files
+#
+# Installed LED theme files join in so user edits to a shipped theme survive a
+# refresh. custom_*.cfg are deliberately excluded: the machine-local theme is
+# created once and then owned by the user - no build may read or rewrite it.
 hh_configs_to_parse := \
-	$(subst $(KLIPPER_CONFIG_HOME),$(IN),$(wildcard $(KLIPPER_CONFIG_HOME)/mmu/base/*.cfg))
+	$(subst $(KLIPPER_CONFIG_HOME),$(IN),$(wildcard $(KLIPPER_CONFIG_HOME)/mmu/base/*.cfg)) \
+	$(subst $(KLIPPER_CONFIG_HOME),$(IN),$(filter-out %custom_%.cfg,$(wildcard $(KLIPPER_CONFIG_HOME)/mmu/led_theme/*.cfg)))
 
 # Set of config files (one if single unit, else n + 1)
 kconfig_files := $(KCONFIG_CONFIG) \
 	$(if $(filter y,$(CONFIG_MULTI_UNIT)), \
 		$(addprefix $(KCONFIG_CONFIG)_,$(unit_names)))
+
+# The Kconfig files holding per-unit values, for the LED theme prune step: the
+# per-unit files in multi-unit, the single top-level one otherwise.
+prune_kconfigs := $(if $(filter y,$(CONFIG_MULTI_UNIT)),$(addprefix $(KCONFIG_CONFIG)_,$(unit_names)),$(KCONFIG_CONFIG))
 
 # Files/targets that need to be built
 build_targets := \
@@ -346,6 +376,25 @@ $(OUT)/mmu/base/mmu_parameters_%.cfg: \
 	$(Q)$(PY) -m installer.build $(V) --build "$<" "$@" \
 		"$(if $(filter y,$(CONFIG_MULTI_UNIT)),$(KCONFIG_CONFIG)_$*,$(KCONFIG_CONFIG))" $(hh_configs_to_parse)
 
+# Per-unit LED theme files: config/led_theme/<theme>.cfg -> mmu/led_theme/<theme>_<unit>.cfg.
+# One rule per shipped theme, generated per theme. The recipe is inlined instead of going
+# through the 'link' macro, and the unit is spelled out with $$*: this rule's text is
+# expanded by $(call) at parse time, when automatic variables are empty, so any $(dir ...),
+# $(abspath ...) or bare $</$@/$* in here would bake an empty string into the recipe
+# (observed on a printer make: 'mkdir -p' and 'ln -sf "" ""').
+# installer.build skips the write when a theme renders empty for this machine and
+# creates the machine-local custom_<unit>.cfg on first use (see build_config_file).
+define led_theme_unit_rule
+$(OUT)/mmu/led_theme/$(1)_%.cfg: \
+  $(SRC)/config/led_theme/$(1).cfg $(hh_configs_to_parse) $(KCONF_REQS)
+	$(Q)mkdir -p $(OUT)/mmu/led_theme
+	$(Q)ln -sf "$(SRC)/config/led_theme/$(1).cfg" "$(OUT)/mmu/led_theme/$(1)_$$*.cfg"
+	$(Q)$(PY) -m installer.build $(V) --build "$(SRC)/config/led_theme/$(1).cfg" \
+		"$(OUT)/mmu/led_theme/$(1)_$$*.cfg" \
+		"$(if $(filter y,$(CONFIG_MULTI_UNIT)),$(KCONFIG_CONFIG)_$$*,$(KCONFIG_CONFIG))" $(hh_configs_to_parse)
+endef
+$(foreach t,$(led_theme_names),$(eval $(call led_theme_unit_rule,$(t))))
+
 # Python files are linked to the out directory
 $(OUT)/klippy/extras/%.py: $(SRC)/extras/%.py
 	$(Q)$(call link,$<,$@)
@@ -425,6 +474,9 @@ install: $(install_targets)
 	$(Q)for f in $(kconfig_files); do \
 		[ -f "$$f" ] && $(SUDO)cp -p "$$f" "$(KLIPPER_CONFIG_HOME)/mmu/$$(basename "$$f")"; \
 	done
+	@# Drop LED theme files no unit selects anymore ('custom' and user-maintained
+	@# theme files are left alone)
+	$(Q)$(PY) -m installer.build $(V) --prune-led-themes "$(KLIPPER_CONFIG_HOME)" $(prune_kconfigs)
 	@# We are done. Restart everything
 	$(Q)$(call restart_service,$(restart_moonraker),Moonraker,$(CONFIG_SERVICE_MOONRAKER))
 	$(Q)$(call restart_service,$(restart_klipper),Klipper,$(CONFIG_SERVICE_KLIPPER))
