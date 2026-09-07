@@ -115,7 +115,12 @@ class TestInitialStatusSchema(unittest.TestCase):
     """The first status snapshot must establish every public subscription field."""
 
     def test_top_level_fields_do_not_change_after_ready(self):
-        for profile in ('boxturtle', 'nfc_spoolman'):
+        expected_nfc_units = {
+            'boxturtle': 0,
+            'nfc_spoolman': 1,
+            'ercf_vvd': 2,
+        }
+        for profile, nfc_units in expected_nfc_units.items():
             with self.subTest(profile=profile):
                 hh = session(profile)
                 try:
@@ -127,7 +132,10 @@ class TestInitialStatusSchema(unittest.TestCase):
 
                     self.assertEqual(set(initial), set(ready))
                     self.assertIn('nfc', initial)
-                    self.assertEqual(bool(initial['nfc']), profile == 'nfc_spoolman')
+                    self.assertEqual(len(initial['nfc']), nfc_units)
+                    if profile == 'ercf_vvd':
+                        self.assertTrue(any(st['shared'] is not None for st in initial['nfc']))
+                        self.assertTrue(any(st['gates'] for st in initial['nfc']))
                     self.assertEqual(hh.errors, [])
                 finally:
                     hh.close()
