@@ -415,7 +415,7 @@ class MmuController(MmuFilamentMovement):
             # on a perfectly good one (and vice versa).
             if self.gate_selected != TOOL_GATE_UNKNOWN and self.mmu_unit(self.gate_selected).calibrator.check_calibrated(CALIBRATED_SELECTOR):
                 try:
-                    self.log_info(f"Selecting last gate used ({self.gate_selected})...")
+                    self.log_info(f"Selecting last gate used ({self.selected_gate_string()})...")
                     self.select_gate(self.gate_selected)
                 except Exception as e:
                     # This is recoverable so just report errors
