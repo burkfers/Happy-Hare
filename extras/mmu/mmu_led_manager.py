@@ -61,6 +61,7 @@ class MmuLedManager:
         self.transient_timers = {} # Lazily registered restore timer per (unit, segment)
         self.transient_pending = {} # Optional queued flash per (unit, segment), promoted when the active flash ends
         self._initialized = False # Used to prevent very early calls before leds are fully initialized
+        self.spool_direction = 0 # Spool direction during check/preload: +1 toward extruder (feeding), -1 toward gate (rewinding), 0 none
 
         # Event handlers
         self.mmu.printer.register_event_handler("klippy:ready", self.handle_ready)
@@ -110,6 +111,7 @@ class MmuLedManager:
     # Called when an action has changed to update LEDs
     # (this could be changed to klipper event)
     def action_changed(self, action, old_action):
+        self.spool_direction = 0 # The direction-matched effect variant lapses with the operation
         gate = self.mmu.gate_selected
 
         # Check for unit specific actions
@@ -233,6 +235,40 @@ class MmuLedManager:
                         status_effect=self.effect_name(unit, operation)
                     )
 
+
+    def set_spool_direction(self, direction):
+        """
+        Spool direction during the current checking/preload operation: +1 filament
+        toward the extruder (spool feeding), -1 toward the gate (spool rewinding).
+        Re-renders the selected gate's gate LEDs with the direction-matched variant
+        of the operation effect. Called by the NFC jog scan as its motion direction
+        changes.
+        """
+        if direction == self.spool_direction:
+            return
+        self.spool_direction = direction
+        if self.mmu.action not in (ACTION_CHECKING, ACTION_PRELOAD):
+            return
+        gate = self.mmu.gate_selected
+        unit = self.mmu_machine.get_mmu_unit_by_gate(gate)
+        if unit is None:
+            return
+        self._set_led(unit.unit_index, gate, exit_effect='default', entry_effect='default', fadetime=0)
+
+    def _directed_effect(self, mmu_unit, effect):
+        """
+        Direction-matched variant of a checking/preload operation effect: when the
+        spool direction is known and the effect name carries a _clockwise or
+        _anticlock word, that word is swapped. Names without a direction word (and
+        static LED setups) pass through unchanged.
+        """
+        if not self.spool_direction or not mmu_unit.leds.animation:
+            return effect
+        target = '_clockwise' if self.spool_direction > 0 else '_anticlock'
+        for name in ('_clockwise', '_anticlock'):
+            if name in effect:
+                return effect.replace(name, target)
+        return effect
 
     # Called when print state changes to update LEDs
     # (this could be changed to klipper event)
@@ -724,7 +760,7 @@ class MmuLedManager:
                         if g == self.mmu.gate_selected and self.mmu.action in (ACTION_CHECKING, ACTION_PRELOAD):
                             op_effect = self.effect_name(unit, 'preloading' if self.mmu.action == ACTION_PRELOAD else 'checking')
                             if op_effect:
-                                return op_effect
+                                return self._directed_effect(mmu_unit, op_effect)
 
                         suffix = '_sel' if g == self.mmu.gate_selected else ''
                         status = self.mmu.gate_status[g]

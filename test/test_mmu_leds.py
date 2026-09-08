@@ -336,8 +336,8 @@ class TestEffectConfiguration(LedTestCase):
     def test_operations_resolve_to_configured_effects(self):
         expected = {
             'gate_selected': 'mmu_static_blue',
-            'checking': 'mmu_breathing_cyan_fast',
-            'preloading': 'mmu_breathing_cyan_fast',
+            'checking': 'mmu_cyan_anticlock_fast',
+            'preloading': 'mmu_cyan_anticlock_fast',
             'pending_spoolid': 'mmu_breathing_purple_slow',
             'pending_spoolid_expiring': 'mmu_breathing_purple_fast',
             'nfc_read': 'mmu_green_strobe_fast',

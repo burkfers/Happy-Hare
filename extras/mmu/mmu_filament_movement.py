@@ -913,6 +913,8 @@ class MmuFilamentMovement:
         definite child.
         """
         endstop_name = compound.name if compound is not None else fallback_es_name
+        # Spin the checking effect the way this leg turns the spool
+        self.led_manager.set_spool_direction(1 if dist > 0 else -1)
         actual, homed, _, _ = self.move_filament(
             label, dist, speed=self.mmu_unit().p.gear_homing_speed, motor="gear",
             homing_move=(1 if dist > 0 else -1), endstop_name=endstop_name)
