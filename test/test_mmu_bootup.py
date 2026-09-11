@@ -280,7 +280,7 @@ class TestConnect(BootedSessionMixin, unittest.TestCase):
         MmuExtruderWrapper strips [extruder]'s stepper options during the section
         loop so PrinterExtruder builds no stepper, then restores them and swaps in
         its own homing-capable stepper at connect
-        (extras/mmu/unit/mmu_extruder_wrapper.py:63-66, 86-96).
+        (extras/mmu/unit/mmu_extruder_wrapper.py:67-69, 91-101).
         """
         extruder = self.hh.printer.lookup_object('extruder')
         wrappers = [o for o in self.hh.printer.objects.values()
