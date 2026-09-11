@@ -43,6 +43,7 @@
 #
 
 import logging, collections, math
+import chelper
 
 # Klipper imports
 from kinematics.extruder import ExtruderStepper, PrinterExtruder
@@ -471,6 +472,69 @@ def MmuLookupRailFromStepper(stepper_obj, config, need_position_minmax=True, def
 
 
 # -----------------------------------------------------------------------------------------------------------
+# MotionQueuingEmulator: the motion_queuing surface MmuStepper uses, for
+# Klipper generations without klippy/extras/motion_queuing.py (old mainline
+# and Kalico).
+#
+# Implements the old-style stepping contract of klippy/extras/manual_stepper.py:
+#   - trapqs are allocated and finalized through the chelper ffi directly
+#   - a plain do_move steps the drive and its manual followers, finalizes the
+#     trapq, then notes movequeue activity on the toolhead
+#   - a drip move hands the steppers to toolhead.drip_update_time(), which
+#     steps them on each drip segment
+#
+# The toolhead is resolved lazily: on those generations it is created after
+# the user config sections, and MmuStepper is constructed during section
+# loading.
+# -----------------------------------------------------------------------------------------------------------
+
+class MotionQueuingEmulator:
+
+    def __init__(self, printer, mmu_stepper):
+        self.printer = printer
+        self.mmu_stepper = mmu_stepper
+        ffi_main, ffi_lib = chelper.get_ffi()
+        self._ffi_main = ffi_main
+        self._trapq_alloc = ffi_lib.trapq_alloc
+        self._trapq_free = ffi_lib.trapq_free
+        self._trapq_finalize_moves = ffi_lib.trapq_finalize_moves
+        self._trapq_append = ffi_lib.trapq_append
+
+    def _toolhead(self):
+        return self.printer.lookup_object('toolhead')
+
+    def _driven_steppers(self):
+        # The drive plus any MmuSteppers sharing its manual trapq
+        mmu_stepper = self.mmu_stepper
+        steppers = list(mmu_stepper.steppers)
+        steppers.extend(follower.stepper for follower in mmu_stepper._manual_followers)
+        return steppers
+
+    def allocate_trapq(self):
+        return self._ffi_main.gc(self._trapq_alloc(), self._trapq_free)
+
+    def lookup_trapq_append(self):
+        return self._trapq_append
+
+    def wipe_trapq(self, trapq):
+        self._trapq_finalize_moves(trapq, self.printer.get_reactor().NEVER, 0.)
+
+    def check_step_generation_scan_windows(self):
+        pass
+
+    def note_mcu_movequeue_activity(self, mq_time, set_step_gen_time=False):
+        for stepper in self._driven_steppers():
+            stepper.generate_steps(mq_time)
+        trapq = self.mmu_stepper.trapq
+        self._trapq_finalize_moves(trapq, mq_time + 99999.9, mq_time + 99999.9)
+        self._toolhead().note_mcu_movequeue_activity(mq_time, set_step_gen_time)
+
+    def drip_update_time(self, start_time, end_time, drip_completion):
+        self._toolhead().drip_update_time(end_time, drip_completion,
+                                          self._driven_steppers())
+
+
+# -----------------------------------------------------------------------------------------------------------
 # Single-stepper MMU stepper with:
 # - manual/MMU behavior but with ability to sync to other MmuSteppers
 # - extruder-stepper compatible behavior including ability to sync to other extruders
@@ -540,7 +604,10 @@ class MmuStepper(ExtruderStepper):
             self.steppers = [self.stepper]
 
         # Setup iterative solver and manual-mode trapq
-        self.motion_queuing = self.printer.load_object(config, 'motion_queuing')
+        self.motion_queuing = self.printer.load_object(config, 'motion_queuing', None)
+        if self.motion_queuing is None:
+            # This generation lacks klippy/extras/motion_queuing.py
+            self.motion_queuing = MotionQueuingEmulator(self.printer, self)
         self.manual_trapq = self.motion_queuing.allocate_trapq()
         self.trapq_append = self.motion_queuing.lookup_trapq_append()
         self.trapq = self.manual_trapq

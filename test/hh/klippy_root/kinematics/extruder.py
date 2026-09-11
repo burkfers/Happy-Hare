@@ -146,9 +146,16 @@ class PrinterExtruder:
         self.max_e_accel = config.getfloat('max_extrude_only_accel', 1000., above=0.)
         self.instant_corner_v = config.getfloat('instantaneous_corner_velocity', 1.,
                                                 minval=0.)
-        mq = self.printer.load_object(config, 'motion_queuing')
-        self.trapq = mq.allocate_trapq()
-        self.trapq_append = mq.lookup_trapq_append()
+        # The pre-motion_queuing generation owns a plain trapq instead (real
+        # old Klipper / Kalico allocate it through the chelper ffi,
+        # kinematics/extruder.py)
+        mq = self.printer.load_object(config, 'motion_queuing', None)
+        if mq is None:
+            self.trapq = object()
+            self.trapq_append = lambda *args: None
+        else:
+            self.trapq = mq.allocate_trapq()
+            self.trapq_append = mq.lookup_trapq_append()
 
         # Only build a stepper when one is configured - see module docstring.
         self.extruder_stepper = None

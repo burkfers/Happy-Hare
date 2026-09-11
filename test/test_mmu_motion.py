@@ -57,9 +57,11 @@ GATE_AVAILABLE = 1
 class MotionTestCase(unittest.TestCase):
     # This suite exercises Box Turtle's real split exit/shared-exit geometry.
     PROFILE = 'boxturtle'
+    # Extra session() kwargs, e.g. the Kalico-generation emulation
+    SESSION_KWARGS = {}
 
     def setUp(self):
-        self.hh = session(self.PROFILE)
+        self.hh = session(self.PROFILE, **self.SESSION_KWARGS)
         self.hh.boot()
         self.assertEqual(self.hh.errors, [], 'bootup was not clean')
         self.fil = self.hh.filament()
@@ -929,6 +931,99 @@ class TestNfcEndstopTrips(unittest.TestCase):
         self.assertIsNotNone(nfc)
         self.assertIsNotNone(switch)
         self.assertLess(nfc, switch[1])
+
+
+def _assert_all_mmu_steppers_on_the_emulator(testcase):
+    # Local import: the fake klippy tree (and hence `extras`) only exists on
+    # sys.path once the session in setUp has installed the overlay.
+    from extras.mmu_stepper import MotionQueuingEmulator
+    printer = testcase.hh.printer
+    testcase.assertIsNone(printer.lookup_object('motion_queuing', None),
+                          'this generation has no motion_queuing module')
+    unit = testcase.hh.mmu.mmu_unit(0)
+    steppers = [d.mmu_gear_stepper for d in unit.drives
+                if d.mmu_gear_stepper is not None]
+    steppers.append(unit.extruder_wrapper.homing_extruder_stepper)
+    for mstepper in steppers:
+        testcase.assertIsInstance(mstepper.motion_queuing, MotionQueuingEmulator,
+                                  'MmuStepper %s must run on the emulator' % mstepper.name)
+
+
+class TestKalico(MotionTestCase):
+    """
+    Kalico-generation session: is_kalico() is True from config load (the
+    'danger_options' marker object) and the motion_queuing module does not
+    exist, exactly as on real Kalico - so MmuStepper must take the
+    MotionQueuingEmulator path for its whole life: boot, homing and plain
+    moves.
+    """
+    SESSION_KWARGS = {'kalico': True}
+
+    def test_boot_without_motion_queuing(self):
+        """
+        The pre-fix crash: MmuStepper.__init__ did
+        printer.load_object(config, 'motion_queuing'), which on real Kalico
+        raises "Module 'motion_queuing' not found" and kills boot. The Kalico
+        generation must boot clean, with every MmuStepper on the emulator.
+        """
+        self._assert_all_mmu_steppers_on_the_emulator()
+        self.assertEqual(self.hh.errors, [])
+
+    def _assert_all_mmu_steppers_on_the_emulator(self):
+        _assert_all_mmu_steppers_on_the_emulator(self)
+
+    def test_load_and_park_on_kalico(self):
+        """
+        The load homes through HomingMove; the park is a PLAIN move - the one
+        that must reach the filament model through the emulator's trapq_append
+        (on real Kalico: the chelper trapq and stepcompress), so the tip must
+        end at the configured park exactly as on mainline Klipper.
+        """
+        self.hh.place_filament(0)
+        self.hh.mmu.select_gate(0)
+        self.hh.mmu._load_gate()
+        self.assertEqual(self.hh.mmu.filament_pos, FILAMENT_POS_HOMED_GATE)
+        mmu = self.hh.mmu
+        mmu._park_from_gate(mmu._gate_profile())
+        gate_park = (self.fil.layout['mmu_shared_exit']
+                     + mmu.mmu_unit(0).p.gate_parking_distance)
+        self.assertAlmostEqual(self.fil.tip[0], gate_park, places=2,
+                               msg='the park move never reached the model')
+        self.assertFalse(self.hh.sensor('unit0:mmu_shared_exit').present)
+        self.assertEqual(self.hh.errors, [])
+
+
+class TestOldKlipper(MotionTestCase):
+    """
+    Old mainline Klipper generation: no motion_queuing module, and no Kalico
+    marker. Old mainline is not officially supported - this is the bonus case
+    that selection on the module's ABSENCE (not on the fork) makes possible.
+    The emulator must be picked without is_kalico() ever being True, and the
+    homing then takes the manual_home branch - the other half of
+    do_homing_move - on top of the emulator.
+    """
+    SESSION_KWARGS = {'old_klipper': True}
+
+    def test_boot_on_the_emulator_without_the_kalico_marker(self):
+        printer = self.hh.printer
+        self.assertFalse(printer.lookup_object('danger_options', False),
+                         'this session must not look like Kalico')
+        _assert_all_mmu_steppers_on_the_emulator(self)
+        self.assertEqual(self.hh.errors, [])
+
+    def test_load_and_park_on_old_klipper(self):
+        self.hh.place_filament(0)
+        self.hh.mmu.select_gate(0)
+        self.hh.mmu._load_gate()
+        self.assertEqual(self.hh.mmu.filament_pos, FILAMENT_POS_HOMED_GATE)
+        mmu = self.hh.mmu
+        mmu._park_from_gate(mmu._gate_profile())
+        gate_park = (self.fil.layout['mmu_shared_exit']
+                     + mmu.mmu_unit(0).p.gate_parking_distance)
+        self.assertAlmostEqual(self.fil.tip[0], gate_park, places=2,
+                               msg='the park move never reached the model')
+        self.assertFalse(self.hh.sensor('unit0:mmu_shared_exit').present)
+        self.assertEqual(self.hh.errors, [])
 
 
 if __name__ == '__main__':
