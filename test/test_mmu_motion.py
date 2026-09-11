@@ -992,6 +992,29 @@ class TestKalico(MotionTestCase):
         self.assertFalse(self.hh.sensor('unit0:mmu_shared_exit').present)
         self.assertEqual(self.hh.errors, [])
 
+    def test_bootup_disables_idle_gear_steppers(self):
+        """
+        MMU_BOOTUP de-energises the idle type-B gear steppers. On the
+        pre-set_motors_enable generation this must go through the per-stepper
+        path - on-printer it crashed with "'PrinterStepperEnable' object has
+        no attribute 'set_motors_enable'".
+        """
+        se = self.hh.printer.lookup_object('stepper_enable')
+        self.assertFalse(hasattr(se, 'set_motors_enable'),
+                         'this generation has no set_motors_enable')
+        unit = self.hh.mmu.mmu_unit(0)
+        gear_drives = [d for d in unit.drives if d.mmu_gear_stepper is not None]
+        self.assertTrue(gear_drives, 'boxturtle must be multigear')
+        for d in gear_drives:
+            d.mmu_gear_stepper.do_enable(True)
+        self.hh.mmu.disable_all_idle_gear_steppers()
+        for d in gear_drives:
+            el = se.lookup_enable(d.mmu_gear_stepper.stepper.get_name())
+            self.assertFalse(el.is_enabled,
+                             'gear stepper %s must be de-energised' % el.name)
+            self.assertEqual(el.transitions[-1][1], False)
+        self.assertEqual(self.hh.errors, [])
+
 
 class TestOldKlipper(MotionTestCase):
     """

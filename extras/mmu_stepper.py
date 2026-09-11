@@ -50,6 +50,7 @@ from kinematics.extruder import ExtruderStepper, PrinterExtruder
 from .                   import force_move
 from .homing             import HomingMove
 from .mmu.mmu_utils      import is_kalico
+from .stepper_enable     import DISABLE_STALL_TIME
 
 
 # -----------------------------------------------------------------------------------------------------------
@@ -893,7 +894,37 @@ class MmuStepper(ExtruderStepper):
     def do_enable(self, enable):
         stepper_names = [s.get_name() for s in self.steppers]
         stepper_enable = self.printer.lookup_object('stepper_enable')
-        stepper_enable.set_motors_enable(stepper_names, enable)
+        if hasattr(stepper_enable, 'set_motors_enable'):
+            stepper_enable.set_motors_enable(stepper_names, enable)
+        else:
+            self._do_enable_legacy(stepper_enable, stepper_names, enable)
+
+
+    def _do_enable_legacy(self, stepper_enable, stepper_names, enable):
+        # Older stepper_enable generations have no set_motors_enable;
+        # mirror its semantics with the per-stepper API
+        toolhead = self.printer.lookup_object('toolhead')
+        # Flush steps to ensure all auto enable callbacks invoked
+        toolhead.flush_step_generation()
+        print_time = None
+        did_change = False
+        for stepper_name in stepper_names:
+            el = stepper_enable.lookup_enable(stepper_name)
+            if el.is_motor_enabled() == enable:
+                continue
+            if print_time is None:
+                # Dwell for sufficient delay from any previous auto enable
+                if not enable:
+                    toolhead.dwell(DISABLE_STALL_TIME)
+                print_time = toolhead.get_last_move_time()
+            if enable:
+                el.motor_enable(print_time)
+            else:
+                el.motor_disable(print_time)
+            did_change = True
+        # Dwell to ensure sufficient delay prior to a future auto enable
+        if did_change and not enable:
+            toolhead.dwell(DISABLE_STALL_TIME)
 
 
     def do_set_position(self, setpos):
