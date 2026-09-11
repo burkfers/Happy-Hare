@@ -621,6 +621,7 @@ class MmuStepper(ExtruderStepper):
         # Manual mode state
         self.manual_motion_queue = None
         self._manual_followers = set()
+        self._step_gen_registered = False
 
         # Registered with toolhead as an extra axis only in manual mode
         self.axis_gcode_id = None
@@ -697,6 +698,34 @@ class MmuStepper(ExtruderStepper):
         return (self.motion_mode == self.MODE_MANUAL and self.manual_motion_queue is None)
 
 
+    def _handle_connect(self):
+        super()._handle_connect()
+        toolhead = self.printer.lookup_object('toolhead')
+        # Older klippys (e.g. Kalico) register the stepper as a toolhead
+        # step generator in super(); newer ones drive step generation
+        # through motion_queuing instead and have no such list.
+        self._step_gen_registered = hasattr(toolhead, 'step_generators')
+        self._sync_step_generator()
+
+
+    def _sync_step_generator(self):
+        # A stepper in manual mode must not be stepped by the toolhead:
+        # toolhead step generation runs ahead of the print time, and the
+        # advanced time cursor breaks drip moves against the manual trapq
+        # ("Internal error in stepcompress").
+        if self.motion_mode == self.MODE_EXTRUDER:
+            if not self._step_gen_registered:
+                toolhead = self.printer.lookup_object('toolhead', None)
+                if toolhead is not None and hasattr(toolhead, 'step_generators'):
+                    toolhead.register_step_generator(
+                        self.stepper.generate_steps)
+                    self._step_gen_registered = True
+        elif self._step_gen_registered:
+            self.printer.lookup_object('toolhead').unregister_step_generator(
+                self.stepper.generate_steps)
+            self._step_gen_registered = False
+
+
     # ----------------------------------------------------------------------
     # Kinematics switching
     # ----------------------------------------------------------------------
@@ -730,6 +759,7 @@ class MmuStepper(ExtruderStepper):
         self.motion_queue = None
         self.manual_motion_queue = None
         self.motion_queuing.check_step_generation_scan_windows()
+        self._sync_step_generator()
 
 
     def _activate_extruder_mode_detached(self, initial=False):
@@ -755,6 +785,7 @@ class MmuStepper(ExtruderStepper):
         self.motion_queue = None
         self.manual_motion_queue = None
         self.motion_queuing.check_step_generation_scan_windows()
+        self._sync_step_generator()
 
 
     def _activate_extruder_motion_queue(self, extruder):
@@ -773,6 +804,7 @@ class MmuStepper(ExtruderStepper):
         self.motion_queue = extruder.get_name()
         self.manual_motion_queue = None
         self.motion_queuing.check_step_generation_scan_windows()
+        self._sync_step_generator()
 
 
     # ----------------------------------------------------------------------

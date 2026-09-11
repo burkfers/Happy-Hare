@@ -58,7 +58,11 @@ class ExtruderStepper:
 
     def _handle_connect(self):
         toolhead = self.printer.lookup_object('toolhead')
-        toolhead.register_step_generator(self.stepper.generate_steps)
+        # The new klippy does not register extruder steppers as step
+        # generators; the pre-motion_queuing generation does (its toolhead
+        # is the one that has the step_generators list - see toolhead.py).
+        if hasattr(toolhead, 'step_generators'):
+            toolhead.register_step_generator(self.stepper.generate_steps)
         self._set_pressure_advance(self.config_pa, self.config_smooth_time)
 
     def get_status(self, eventtime):

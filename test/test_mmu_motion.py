@@ -949,6 +949,33 @@ def _assert_all_mmu_steppers_on_the_emulator(testcase):
                                   'MmuStepper %s must run on the emulator' % mstepper.name)
 
 
+def _assert_step_generator_tracking(testcase):
+    # Old-generation toolheads step every registered generator ahead of the
+    # print time; a manual-mode stepper stepped that way runs its time
+    # cursor ahead of the manual trapq, and the next drip move dies in
+    # stepcompress ("Internal error in stepcompress" on a real Kalico).
+    # Manual-mode steppers must come off the toolhead's step generator list
+    # and return to it when they enter extruder mode.
+    toolhead = testcase.hh.printer.lookup_object('toolhead')
+    testcase.assertTrue(hasattr(toolhead, 'step_generators'),
+                        'this generation\'s toolhead must expose step generators')
+    unit = testcase.hh.mmu.mmu_unit(0)
+    gear = next(d.mmu_gear_stepper for d in unit.drives
+                if d.mmu_gear_stepper is not None)
+    handler = gear.stepper.generate_steps
+    testcase.assertNotIn(handler, toolhead.step_generators,
+                         'a manual-mode stepper must not be stepped by the toolhead')
+    home = unit.extruder_wrapper.homing_extruder_stepper
+    testcase.assertIn(home.stepper.generate_steps, toolhead.step_generators,
+                      'the homing extruder stepper stays with the toolhead')
+    gear.switch_to_extruder_mode()
+    testcase.assertIn(handler, toolhead.step_generators,
+                      'extruder mode follows the toolhead through step generation')
+    gear.switch_to_manual_mode()
+    testcase.assertNotIn(handler, toolhead.step_generators)
+    testcase.assertEqual(testcase.hh.errors, [])
+
+
 class TestKalico(MotionTestCase):
     """
     Kalico-generation session: is_kalico() is True from config load (the
@@ -1015,6 +1042,17 @@ class TestKalico(MotionTestCase):
             self.assertEqual(el.transitions[-1][1], False)
         self.assertEqual(self.hh.errors, [])
 
+    def test_manual_mode_steppers_off_toolhead_step_generators(self):
+        """
+        The on-printer "Internal error in stepcompress": the inherited
+        Kalico _handle_connect registered every MmuStepper as a toolhead
+        step generator, so toolhead step generation ran the stepper's time
+        cursor ahead of the manual trapq; the gate homing's drip move then
+        asked for steps at an earlier time and stepcompress blew up. Manual
+        mode must take the stepper off the toolhead's step generator list.
+        """
+        _assert_step_generator_tracking(self)
+
 
 class TestOldKlipper(MotionTestCase):
     """
@@ -1047,6 +1085,9 @@ class TestOldKlipper(MotionTestCase):
                                msg='the park move never reached the model')
         self.assertFalse(self.hh.sensor('unit0:mmu_shared_exit').present)
         self.assertEqual(self.hh.errors, [])
+
+    def test_manual_mode_steppers_off_toolhead_step_generators(self):
+        _assert_step_generator_tracking(self)
 
 
 if __name__ == '__main__':
