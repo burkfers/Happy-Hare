@@ -426,8 +426,9 @@ class PrinterHoming:
         NOTE the `probe_pos` parameter. This is the NEWER Klipper signature - mainline
         v0.13.0-111 and forks such as Kalico have manual_home(self, toolhead, endstops,
         pos, speed, triggered, check_triggered) with no probe_pos and no return value.
-        HH's do_homing_move uses it on Klipper and drives HomingMove directly on
-        Kalico (its manual_home would drop probe_pos and report the move target),
+        HH's do_homing_move introspects this signature and uses manual_home when
+        probe_pos is present, driving HomingMove directly otherwise (a manual_home
+        without probe_pos would report the move target as the trigger position),
         so this keeps the Klipper shape. (Mainline also lacks extras/motion_queuing.py,
         HH's other bleeding-edge dependency.)
         """

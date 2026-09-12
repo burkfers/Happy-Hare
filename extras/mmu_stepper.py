@@ -42,14 +42,13 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 #
 
-import logging, collections, math
+import logging, collections, math, inspect
 import chelper
 
 # Klipper imports
 from kinematics.extruder import ExtruderStepper, PrinterExtruder
 from .                   import force_move
 from .homing             import HomingMove
-from .mmu.mmu_utils      import is_kalico
 from .stepper_enable     import DISABLE_STALL_TIME
 
 
@@ -1011,19 +1010,20 @@ class MmuStepper(ExtruderStepper):
 
         endstops = self.rail.get_homing_endstops(endstop_name)
 
-        if is_kalico(self.printer):
-            # Kalico's manual_home predates the probe_pos argument and returns
-            # no trigger position - going through it would report the move
-            # target as the position. Drive HomingMove directly instead, the
-            # approach the verified v3 code used on Kalico.
+        phoming = self.printer.lookup_object('homing')
+        if 'probe_pos' in inspect.signature(phoming.manual_home).parameters:
+            trigpos = phoming.manual_home(self, endstops, pos, speed, probe_pos,
+                                          triggered, check_trigger)
+        else:
+            # Klippys whose manual_home predates the probe_pos argument (e.g.
+            # Kalico, mainline v0.13.0-111) also return no trigger position -
+            # going through it would report the move target as the position.
+            # Drive HomingMove directly instead, the approach the verified v3
+            # code used on Kalico.
             hmove = HomingMove(self.printer, endstops, self)
             trigpos = hmove.homing_move(pos, speed, probe_pos=probe_pos,
                                         triggered=triggered,
                                         check_triggered=check_trigger)
-        else:
-            phoming = self.printer.lookup_object('homing')
-            trigpos = phoming.manual_home(self, endstops, pos, speed, probe_pos,
-                                          triggered, check_trigger)
         self.sync_print_time()
         haltpos = self.get_position()
 

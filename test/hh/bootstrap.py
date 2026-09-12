@@ -166,6 +166,27 @@ class Session:
         chelper.get_ffi = lambda: self._pre_motion_queuing_ffi(printer)
         return self
 
+    def _install_legacy_manual_home(self, printer):
+        """
+        Pre-motion_queuing generations also predate manual_home's probe_pos
+        argument (and its trigger-position return): swap the fake
+        PrinterHoming's for the old signature, so do_homing_move's signature
+        introspection takes the HomingMove-direct path exactly as on those
+        klippys. Must run after the toolhead phase: the homing object is
+        registered by the toolhead module as it loads.
+        """
+        from extras.homing import HomingMove
+        homing = printer.lookup_object('homing')
+
+        def legacy_manual_home(toolhead, endstops, movepos, speed,
+                               triggered, check_triggered):
+            hmove = HomingMove(printer, endstops, toolhead)
+            hmove.homing_move(movepos, speed, probe_pos=False,
+                              triggered=triggered, check_triggered=check_triggered)
+            return movepos
+        homing.manual_home = legacy_manual_home
+        return self
+
     def _pre_motion_queuing_ffi(self, printer):
         class _Trapq:
             def __init__(self):
@@ -347,6 +368,8 @@ class Session:
         import toolhead as toolhead_mod
         from kinematics import extruder as extruder_mod
         toolhead_mod.add_printer_objects(self.config)
+        if self.kalico or self.old_klipper:
+            self._install_legacy_manual_home(self.printer)
         extruder_mod.add_printer_objects(self.config)
         self.printer.send_event('klippy:connect')
         self.apply_initial_sensor_states()

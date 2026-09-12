@@ -433,20 +433,22 @@ class TestLoadGate(MotionTestCase):
 
     def test_kalico_homing_drives_homing_move_directly(self):
         """
-        Kalico's manual_home predates the probe_pos argument and returns no
-        trigger position: going through it, homing_move runs with probe_pos=False
-        and reports the move TARGET as the position - a bowden calibration on
-        Kalico measured the 2000mm homing max instead of the ~1200mm tube length.
-        do_homing_move therefore drives HomingMove directly on Kalico (the
-        approach the verified v3 code used there), passing probe_pos through, and
-        never calls manual_home. On Klipper it keeps using manual_home, which has
-        the probe_pos parameter.
+        Klippys whose manual_home predates the probe_pos argument (Kalico,
+        mainline v0.13.0-111) return no trigger position either: going through
+        manual_home, homing_move runs with probe_pos=False and reports the move
+        TARGET as the position - a bowden calibration on Kalico measured the
+        2000mm homing max instead of the ~1200mm tube length. do_homing_move
+        therefore introspects manual_home's signature and, when probe_pos is
+        absent, drives HomingMove directly (the approach the verified v3 code
+        used on Kalico), passing probe_pos through, and never calls manual_home.
+        Klippys with the probe_pos parameter keep using manual_home.
 
-        Simulate Kalico by registering a 'danger_options' object (Kalico's marker
-        module) so is_kalico() reports True, record any manual_home call (there
-        must be none), and assert the move goes through HomingMove.homing_move
-        with probe_pos. ('danger_options' is left registered: session-scoped, the
-        harness has no removal API, and nothing else in a session consults it.)
+        Simulate the old generation by swapping the fake PrinterHoming's
+        manual_home for a probe_pos-less version that returns the move target,
+        as the old implementations did. The signature IS the branch condition,
+        so no fork marker object is involved; record any manual_home call
+        (there must be none) and assert the move goes through
+        HomingMove.homing_move with probe_pos.
         """
         # Local import: the fake klippy tree (and hence `extras`) only exists on
         # sys.path once the session in setUp has installed the overlay.
@@ -455,7 +457,17 @@ class TestLoadGate(MotionTestCase):
         homing = printer.lookup_object('homing')
         manual_home_calls = []
         original_manual_home = homing.manual_home
-        homing.manual_home = lambda *args: manual_home_calls.append(args)
+
+        def legacy_manual_home(toolhead, endstops, movepos, speed,
+                               triggered, check_triggered):
+            # Old-generation signature: no probe_pos, and the move target is
+            # what the caller ends up with.
+            manual_home_calls.append((movepos, speed))
+            hmove = HomingMove(printer, endstops, toolhead)
+            hmove.homing_move(movepos, speed, probe_pos=False,
+                              triggered=triggered, check_triggered=check_triggered)
+            return movepos
+        homing.manual_home = legacy_manual_home
 
         moves = []
         original_homing_move = HomingMove.homing_move
@@ -467,7 +479,6 @@ class TestLoadGate(MotionTestCase):
                                         triggered=triggered,
                                         check_triggered=check_triggered)
 
-        printer.add_object('danger_options', object())
         try:
             HomingMove.homing_move = recording_homing_move
             overshoot = self.hh.mmu._load_gate()
@@ -476,12 +487,13 @@ class TestLoadGate(MotionTestCase):
             homing.manual_home = original_manual_home
 
         self.assertEqual(manual_home_calls, [],
-                         'do_homing_move must not use manual_home on Kalico')
+                         'do_homing_move must not use a manual_home that lacks '
+                         'the probe_pos parameter')
         self.assertEqual(len(moves), 1)
         probe_pos, triggered, check_triggered = moves[0]
         self.assertTrue(probe_pos,
-                        'Kalico homing must pass probe_pos through, or the move '
-                        'target is reported as the trigger position')
+                        'old-generation homing must pass probe_pos through, or '
+                        'the move target is reported as the trigger position')
         self.assertEqual(self.hh.mmu.filament_pos, FILAMENT_POS_HOMED_GATE)
         self.assertEqual(overshoot, 0.0)
         self.assertEqual(self.hh.errors, [])
@@ -1060,8 +1072,9 @@ class TestOldKlipper(MotionTestCase):
     marker. Old mainline is not officially supported - this is the bonus case
     that selection on the module's ABSENCE (not on the fork) makes possible.
     The emulator must be picked without is_kalico() ever being True, and the
-    homing then takes the manual_home branch - the other half of
-    do_homing_move - on top of the emulator.
+    homing then takes the HomingMove-direct branch of do_homing_move - old
+    mainline's manual_home also predates probe_pos, so the signature
+    introspection routes it there too - on top of the emulator.
     """
     SESSION_KWARGS = {'old_klipper': True}
 
