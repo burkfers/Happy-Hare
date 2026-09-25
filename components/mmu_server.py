@@ -474,7 +474,19 @@ class MmuServer:
         filament_id = filament.get('id', '')
         rfid_uids = self._get_uid_list_from_extra(spool_info.get('extra'))
         rfids = ','.join(rfid_uids)
-        return {'spool_id': spool_id, 'material': material, 'color': color_hex, 'name': name, 'temp': temp, 'bed_temp': bed_temp, 'vendor': vendor, 'filament_id': filament_id, 'rfids': rfids}
+        return {
+            'spool_id': spool_id,
+            'material': material,
+            'color': color_hex,
+            'name': name,
+            'temp': temp,
+            'bed_temp': bed_temp,
+            'vendor': vendor,
+            'filament_id': filament_id,
+            'rfids': rfids,
+            'remaining_weight': spool_info.get('remaining_weight'),
+            'initial_weight': spool_info.get('initial_weight'),
+        }
 
 
     async def _build_spool_location_cache(self, fix=False, silent=False) -> bool:

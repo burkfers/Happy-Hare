@@ -96,6 +96,38 @@ menu "Print start/end      (_MMU_SOFTWARE)"
     default "'closest_color'" if CHOICE_SOFTWARE_AUTOMAP_STRATEGY_CLOSEST_COLOR
     default "'spool_id'" if CHOICE_SOFTWARE_AUTOMAP_STRATEGY_SPOOL_ID
 
+  choice CHOICE_SOFTWARE_AUTOMAP_RESOLUTION
+    prompt "Automap same-filament resolution"
+    default CHOICE_SOFTWARE_AUTOMAP_RESOLUTION_LAST
+    help
+      Choose which gate to use when several gates match the automap
+      strategy. Requires Spoolman remaining/initial weight for least_full.
+
+  config CHOICE_SOFTWARE_AUTOMAP_RESOLUTION_FIRST
+    bool "first"
+    help
+      Select the matching gate with the lowest gate number.
+
+  config CHOICE_SOFTWARE_AUTOMAP_RESOLUTION_LAST
+    bool "last"
+    help
+      Select the matching gate with the highest gate number.
+      This preserves the previous automapping behavior.
+
+  config CHOICE_SOFTWARE_AUTOMAP_RESOLUTION_LEAST_FULL
+    bool "least_full"
+    help
+      Select the matching spool with the lowest remaining weight percentage.
+      Fall back to last when fullness is unavailable.
+
+  endchoice
+
+  config VAR_SOFTWARE_AUTOMAP_RESOLUTION
+    string
+    default "'first'" if CHOICE_SOFTWARE_AUTOMAP_RESOLUTION_FIRST
+    default "'last'" if CHOICE_SOFTWARE_AUTOMAP_RESOLUTION_LAST
+    default "'least_full'" if CHOICE_SOFTWARE_AUTOMAP_RESOLUTION_LEAST_FULL
+
   comment "_"
   comment "_Print END behavior"
 

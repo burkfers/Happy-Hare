@@ -233,6 +233,7 @@ class MmuGateMapCommand(BaseCommand):
                             self._safe_int(fil.get('temp', mmu.p.default_extruder_temp)),
                             mmu.p.default_extruder_temp
                         )
+                        self._set_gate_spool_weights(gate_idx, fil)
                         # The observed RFID is local hardware state and is never supplied by
                         # Spoolman. A non-Spoolman map may still set one validated UID explicitly.
                         if not from_spoolman and 'rfid' in fil:
@@ -284,6 +285,10 @@ class MmuGateMapCommand(BaseCommand):
                         # spool changes.
                         if 'rfids' in fil:
                             mmu.gate_maps.set_gate_rfid_aliases(gate_idx, fil.get('rfids'))
+
+                        # Spoolman supplies this with the spool attributes. A local/UI map
+                        # without it clears the transient value rather than retaining stale data.
+                        self._set_gate_spool_weights(gate_idx, fil)
 
                     changed_gate_ids = list(ids_dict.items())
 
@@ -405,8 +410,25 @@ class MmuGateMapCommand(BaseCommand):
     def _safe_int(self, i, default=0):
         try:
             return int(i)
-        except ValueError:
+        except (TypeError, ValueError):
             return default
+
+
+    def _set_gate_spool_weights(self, gate, attributes):
+        """Store transient Spoolman weight data used by automap resolution."""
+        def weight(name):
+            value = self._safe_float(attributes.get(name), default=None)
+            return value if value is not None and value >= 0 else None
+        self.mmu.gate_maps.gate_remaining_weight[gate] = weight('remaining_weight')
+        self.mmu.gate_maps.gate_initial_weight[gate] = weight('initial_weight')
+
+
+    def _safe_float(self, value, default=0.0):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return default
+        return value if math.isfinite(value) else default
 
 
     def _set_gate_rfid(self, gate, rfid):

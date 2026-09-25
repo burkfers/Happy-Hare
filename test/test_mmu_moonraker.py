@@ -142,6 +142,15 @@ class TestFieldKeysMatchProduction(MoonrakerTestCase):
         self.assertEqual(spoolman.FIELD_RFID, mod.MMU_RFID_FIELD)
 
 
+class TestFullnessMetadata(MoonrakerTestCase):
+    SPOOLS = (dict(remaining_weight=250, initial_weight=1000, material='PLA'),)
+
+    def test_cache_preserves_remaining_and_initial_weight(self):
+        attrs = self.hh.mmu_server.spool_location[1][2]
+        self.assertEqual(attrs['remaining_weight'], 250)
+        self.assertEqual(attrs['initial_weight'], 1000)
+
+
 class TestUidCache(MoonrakerTestCase):
     SPOOLS = (dict(uid='04:A1:B2:C3', material='PLA', vendor='Prusament'),)
 

@@ -340,6 +340,12 @@ AUTOMAP_CLOSEST_COLOR  = 'closest_color'
 AUTOMAP_COLOR          = 'color'
 AUTOMAP_OPTIONS        = [AUTOMAP_NONE, AUTOMAP_FILAMENT_NAME, AUTOMAP_SPOOL_ID, AUTOMAP_MATERIAL, AUTOMAP_CLOSEST_COLOR, AUTOMAP_COLOR]
 
+# How automap resolves multiple gates that match the same strategy
+AUTOMAP_RESOLUTION_FIRST      = 'first'
+AUTOMAP_RESOLUTION_LAST       = 'last'
+AUTOMAP_RESOLUTION_LEAST_FULL = 'least_full'
+AUTOMAP_RESOLUTION_OPTIONS    = [AUTOMAP_RESOLUTION_FIRST, AUTOMAP_RESOLUTION_LAST, AUTOMAP_RESOLUTION_LEAST_FULL]
+
 # Calibration steps
 CALIBRATED_NONE      = 0b00000 # Used to skip calibration check
 CALIBRATED_GEAR_0    = 0b00001 # Specifically rotation_distance for gate 0

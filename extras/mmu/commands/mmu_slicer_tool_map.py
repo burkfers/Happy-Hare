@@ -41,6 +41,7 @@ class MmuSlicerToolMapCommand(BaseCommand):
         + "PURGE_VOLUMES    = Command separated list of volumes (length: single, n_tool, 2x_n_tool, nxn_tool)\n"
         + "NUM_SLICER_TOOLS = # (optional, <= num_gates)\n"
         + "AUTOMAP          = [none|filament_name|spool_id|material|closest_color|color] Set automap strategy\n"
+        + "RESOLUTION       = [first|last|least_full] Resolve multiple matching gates\n"
         + "SKIP_AUTOMAP     = 1 Skip automap for next print (one-print option)\n"
         + "(no parameters for status report)\n"
     )
@@ -86,6 +87,7 @@ class MmuSlicerToolMapCommand(BaseCommand):
         purge_volumes = gcmd.get('PURGE_VOLUMES', "")
         num_slicer_tools = gcmd.get_int('NUM_SLICER_TOOLS', mmu.num_gates, minval=1, maxval=mmu.num_gates)
         automap_strategy = gcmd.get('AUTOMAP', None)
+        automap_resolution = gcmd.get('RESOLUTION', AUTOMAP_RESOLUTION_LAST)
         skip_automap = gcmd.get_int('SKIP_AUTOMAP', None, minval=0, maxval=1)
 
         # Ensure webhooks always sees a change if we edit map
@@ -105,7 +107,7 @@ class MmuSlicerToolMapCommand(BaseCommand):
             if used:
                 mmu.gate_maps.slicer_tool_map['referenced_tools'] = sorted(set(mmu.gate_maps.slicer_tool_map['referenced_tools'] + [tool]))
                 if not mmu.gate_maps.slicer_tool_map.get('skip_automap', False) and automap_strategy and automap_strategy != AUTOMAP_NONE:
-                    mmu.gate_maps.automap_gate(tool, automap_strategy)
+                    mmu.gate_maps.automap_gate(tool, automap_strategy, automap_resolution)
             if color:
                 mmu.gate_maps.update_slicer_color_rgb()
             quiet = True

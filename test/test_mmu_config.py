@@ -180,6 +180,21 @@ class TestBoxTurtleRender(unittest.TestCase):
         # The prompt is hidden in this mode, but the typed symbol retains an explicit value.
         self.assertEqual(params['gate_preload_attempts'], '1')
 
+    def test_automap_resolution_defaults_to_last_and_renders_all_choices(self):
+        default_parser = cfg.assemble(self.rendered, macros=False)
+        default_vars = dict(default_parser.items('gcode_macro _MMU_SOFTWARE_VARS'))
+        self.assertEqual(ast.literal_eval(default_vars['variable_automap_resolution']), 'last')
+
+        for choice, expected in (
+                ('CHOICE_SOFTWARE_AUTOMAP_RESOLUTION_FIRST', 'first'),
+                ('CHOICE_SOFTWARE_AUTOMAP_RESOLUTION_LEAST_FULL', 'least_full')):
+            with self.subTest(choice=choice):
+                profile = profiles.get('boxturtle').derive(
+                    'boxturtle_' + expected + '_automap', syms={choice: True})
+                parser = cfg.assemble(cfg.render(profile), macros=False)
+                variables = dict(parser.items('gcode_macro _MMU_SOFTWARE_VARS'))
+                self.assertEqual(ast.literal_eval(variables['variable_automap_resolution']), expected)
+
     def test_every_rendered_macro_variable_is_a_valid_klipper_literal(self):
         """Real Klipper rejects the entire config if any variable is not a Python literal."""
         parser = cfg.assemble(self.rendered, macros=False)

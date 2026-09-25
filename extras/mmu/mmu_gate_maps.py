@@ -74,6 +74,10 @@ class MmuGateMaps:
         self.gate_spool_rfid = [self.normalize_gate_rfid(uid) or ''
                                 for uid in self.gate_spool_rfid]
 
+        # Transient Spoolman fullness data used to resolve duplicate automap matches.
+        self.gate_remaining_weight = [None] * self.num_gates
+        self.gate_initial_weight = [None] * self.num_gates
+
         # Non-persisted aliases supplied by Spoolman for NFC noisy-neighbor
         # attribution. gate_spool_rfid remains the single UID physically observed
         # at the gate; this cache contains every UID registered to its spool.
@@ -413,6 +417,8 @@ class MmuGateMaps:
         for _, attr, default in self._gate_map_vars:
             if attr != 'gate_status':
                 getattr(self, attr)[gate] = default
+        self.gate_remaining_weight[gate] = None
+        self.gate_initial_weight[gate] = None
         self.gate_spool_rfid_aliases[gate] = tuple()
 
 
@@ -437,6 +443,8 @@ class MmuGateMaps:
         if self.gate_spool_id[gate] != spool_id:
             self.gate_filament_changed(gate)
             self.gate_spool_rfid_aliases[gate] = tuple()
+            self.gate_remaining_weight[gate] = None
+            self.gate_initial_weight[gate] = None
         self.gate_spool_id[gate] = spool_id
         mod_gate_ids = [(gate, spool_id)]
         for i, sid in enumerate(self.gate_spool_id):
@@ -445,6 +453,8 @@ class MmuGateMaps:
                     self.gate_filament_changed(i)
                 self.gate_spool_id[i] = -1
                 self.gate_spool_rfid_aliases[i] = tuple()
+                self.gate_remaining_weight[i] = None
+                self.gate_initial_weight[i] = None
                 mod_gate_ids.append((i, -1))
         return mod_gate_ids
 
@@ -782,9 +792,12 @@ class MmuGateMaps:
 # AUTOMAP SUPPORT
 # -----------------------------------------------------------------------------------------------------------
 
-    def automap_gate(self, tool, strategy):
+    def automap_gate(self, tool, strategy, resolution=AUTOMAP_RESOLUTION_LAST):
         if tool is None:
             self.mmu.log_error("Automap tool called without a tool argument")
+            return
+        if resolution not in AUTOMAP_RESOLUTION_OPTIONS:
+            self.mmu.log_error("Invalid automap resolution '%s'" % resolution)
             return
         tool_to_remap = self.slicer_tool_map['tools'][str(tool)]
 
@@ -824,6 +837,8 @@ class MmuGateMaps:
             errors.append("%s of tool %s must be set. When using automapping all referenced tools must have a %s" % (tool_field, tool, strategy_str))
 
         if not errors:
+            candidates = []
+
             # 'standard' exactly matching fields
             if strategy != AUTOMAP_CLOSEST_COLOR:
                 for gn, gate_feature in enumerate(search_in):
@@ -835,9 +850,8 @@ class MmuGateMaps:
                     else:
                         equal = tool_to_remap[tool_field] == gate_feature
                     if equal:
-                        remaps.append("T%s --> G%s (%s)" % (tool, gn, gate_feature))
-                        self.mmu.wrap_gcode_command("MMU_TTG_MAP TOOL=%d GATE=%d QUIET=1" % (tool, gn))
-                if not remaps:
+                        candidates.append((gn, gate_feature))
+                if not candidates:
                     errors.append("No gates found for tool %s with %s %s" % (tool, strategy_str, tool_to_remap[tool_field]))
 
             # 'colors' search for closest
@@ -859,26 +873,55 @@ class MmuGateMaps:
                     closest, distance = MmuColorUtils.find_closest_color(tool_to_remap['color'], color_list)
                     for gn, color in enumerate(search_in):
                         gm = "".join(self.gate_material[gn].strip()).replace('#', '').lower()
-                        if gm == tool_to_remap['material'].lower():
-                            if closest == color:
-                                t = self.p.console_gate_stat
-                                if distance > 0.5:
-                                    warnings.append("Color matching is significantly different ! %s" % (UI_EMOTICONS[7] if t == 'emoticon' else ''))
-                                elif distance > 0.2:
-                                    warnings.append("Color matching might be noticeably different %s" % (UI_EMOTICONS[5] if t == 'emoticon' else ''))
-                                elif distance > 0.05:
-                                    warnings.append("Color matching seems quite good %s" % (UI_EMOTICONS[3] if t == 'emoticon' else ''))
-                                elif distance > 0.02:
-                                    warnings.append("Color matching is excellent %s" % (UI_EMOTICONS[2] if t == 'emoticon' else ''))
-                                else:
-                                    warnings.append("Color matching is perfect %s" % (UI_EMOTICONS[1] if t == 'emoticon' else ''))
-                                remaps.append("T%s --> G%s (%s with closest color: %s)" % (tool, gn, gm, color))
-                                self.mmu.wrap_gcode_command("MMU_TTG_MAP TOOL=%d GATE=%d QUIET=1" % (tool, gn))
+                        if gm == tool_to_remap['material'].lower() and closest == color:
+                            candidates.append((gn, color))
+                    if not candidates:
+                        errors.append("Unable to find a suitable color for tool %s (color: %s)" % (tool, tool_to_remap['color']))
+                    else:
+                        t = self.p.console_gate_stat
+                        if distance > 0.5:
+                            warnings.append("Color matching is significantly different ! %s" % (UI_EMOTICONS[7] if t == 'emoticon' else ''))
+                        elif distance > 0.2:
+                            warnings.append("Color matching might be noticeably different %s" % (UI_EMOTICONS[5] if t == 'emoticon' else ''))
+                        elif distance > 0.05:
+                            warnings.append("Color matching seems quite good %s" % (UI_EMOTICONS[3] if t == 'emoticon' else ''))
+                        elif distance > 0.02:
+                            warnings.append("Color matching is excellent %s" % (UI_EMOTICONS[2] if t == 'emoticon' else ''))
+                        else:
+                            warnings.append("Color matching is perfect %s" % (UI_EMOTICONS[1] if t == 'emoticon' else ''))
 
-                if not remaps:
-                    errors.append("Unable to find a suitable color for tool %s (color: %s)" % (tool, tool_to_remap['color']))
+            matched_count = len(candidates)
+            if candidates and matched_count > 1:
+                if resolution == AUTOMAP_RESOLUTION_FIRST:
+                    candidates = candidates[:1]
+                elif resolution == AUTOMAP_RESOLUTION_LAST:
+                    candidates = candidates[-1:]
+                elif resolution == AUTOMAP_RESOLUTION_LEAST_FULL:
+                    fullness = []
+                    for gn, _gate_feature in candidates:
+                        remaining = self.gate_remaining_weight[gn]
+                        initial = self.gate_initial_weight[gn]
+                        if remaining is None or initial is None or initial <= 0 or remaining < 0:
+                            fullness = None
+                            break
+                        fullness.append((remaining / initial, gn, _gate_feature))
+                    if fullness is None:
+                        warnings.append("Spool fullness unavailable for all matching gates; using last automap resolution")
+                        candidates = candidates[-1:]
+                    else:
+                        ratio, gn, gate_feature = min(fullness)
+                        candidates = [(gn, gate_feature)]
+                        messages.append("Selected least-full spool at gate %s (%.1f%% remaining)" % (gn, ratio * 100))
 
-            if len(remaps) > 1:
+            for gn, gate_feature in candidates:
+                if strategy == AUTOMAP_CLOSEST_COLOR:
+                    gm = "".join(self.gate_material[gn].strip()).replace('#', '').lower()
+                    remaps.append("T%s --> G%s (%s with closest color: %s)" % (tool, gn, gm, gate_feature))
+                else:
+                    remaps.append("T%s --> G%s (%s)" % (tool, gn, gate_feature))
+                self.mmu.wrap_gcode_command("MMU_TTG_MAP TOOL=%d GATE=%d QUIET=1" % (tool, gn))
+
+            if len(candidates) > 1:
                 warnings.append("Multiple gates found for tool %s with %s '%s'" % (tool, strategy_str, tool_to_remap[tool_field]))
 
         # Display messages while automapping
@@ -936,6 +979,8 @@ class MmuGateMaps:
         self.gate_spool_id = list(self.gate_spool_id)
         self.gate_speed_override = list(self.gate_speed_override)
         self.gate_spool_rfid = list(self.gate_spool_rfid)
+        self.gate_remaining_weight = list(self.gate_remaining_weight)
+        self.gate_initial_weight = list(self.gate_initial_weight)
 
 
     def get_status(self, eventtime):
