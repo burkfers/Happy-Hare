@@ -22,7 +22,7 @@ from itertools                  import repeat
 # Happy Hare imports
 from .mmu_constants             import *
 from .mmu_logger                import MmuLogger
-from .mmu_utils                 import MmuError, MmuColorUtils
+from .mmu_utils                 import MmuError, MmuColorUtils, is_kalico
 from .mmu_sensor_manager        import MmuSensorManager
 from .mmu_sensor_utils          import MmuRunoutHelper
 from .mmu_led_manager           import MmuLedManager
@@ -65,14 +65,14 @@ class MmuController(MmuFilamentMovement):
         self._slicer_purge_volume = 0.          # During toolchange, the slicer contributed part of purge volume
         self._standalone_sync = False           # Used to indicate synced extruder intention whilst out of print
         self.bowden_start_pos = None            # If set then we can measure bowden progress
-        self.has_blobifier = False              # Post load blobbling macro (like BLOBIFIER)
+        self.has_blobifier = False              # Post load purging macro (like BLOBIFIER)
         self.has_mmu_cutter = False             # Post unload cutting macro (like EREC)
         self.has_toolhead_cutter = False        # Form tip cutting macro (like _MMU_CUT_TIP)
         self._is_running_test = False           # True while running QA or soak tests
         self._gear_run_current_depth = 0        # Nesting depth of wrap_gear_current(), which locks out changes
         self.p = mmu_machine.params             # Shared Parameters shortcut
 
-        self.kalico = bool(self.printer.lookup_object('danger_options', False))
+        self.kalico = is_kalico(self.printer)
 
         # Tool speed and extrusion multipliers
         self.tool_speed_multipliers     = [1.0] * self.num_gates # M220 record
@@ -100,7 +100,7 @@ class MmuController(MmuFilamentMovement):
 
         # Bootup tasks --------------------------------------------------------------------------------------
 
-        # Scheduled as regular gcode command to ensure everything is copecetic prior to running
+        # Scheduled as regular gcode command to ensure everything is ready prior to running
         self.gcode.register_command('__MMU_BOOTUP', self.cmd_MMU_BOOTUP, desc = self.cmd_MMU_BOOTUP_help)
 
 
@@ -2243,7 +2243,9 @@ class MmuController(MmuFilamentMovement):
 # ERROR HANDLING AND RESUME LOGIC
 # -----------------------------------------------------------------------------------------------------------
 
-    def handle_mmu_error(self, reason, force_in_print=False):
+    # recover=False suppresses the sensor-based position guess but keeps the normal
+    # pause/error handling. For callers whose failure left the position genuinely unknown.
+    def handle_mmu_error(self, reason, force_in_print=False, recover=True):
         self.psm.fix_started_state() # Get out of 'started' state before transition to mmu pause
 
         run_pause_macro = run_error_macro = recover_pos = send_event = False
@@ -2286,7 +2288,10 @@ class MmuController(MmuFilamentMovement):
             self.pause_resume.send_pause_command()
 
         if recover_pos:
-            self.recover_filament_pos(message=True)
+            if recover:
+                self.recover_filament_pos(message=True)
+            else:
+                self.log_always("Filament position is unknown. Use MMU_RECOVER to establish it")
 
         # Intention is not to sync unless we have to but will be restored on resume/continue_printing
         self.reset_sync_gear_to_extruder(force_grip=True)
@@ -2432,7 +2437,7 @@ class MmuController(MmuFilamentMovement):
 
                 self.saved_toolhead_operation = operation # Update operation in progress
                 # Force re-park now because user may not be using HH client_macros. This can result
-                # in duplicate calls to parking macro but it is itempotent and will ignore
+                # in duplicate calls to parking macro but it is idempotent and will ignore
                 self.wrap_gcode_command(self.p.park_macro)
         else:
             self.log_debug("Cannot save toolhead position or z-hop for %s because not homed" % operation)
@@ -2576,7 +2581,7 @@ class MmuController(MmuFilamentMovement):
 
         Separate from wrap_suspend_filament_monitoring, which only disables the runout
         branch. The case this covers is a USER insertion arriving mid-operation - typically
-        filament pushed in just after MMU_PRELOAD was issued. gcode.run_script serialises
+        filament pushed in just after MMU_PRELOAD was issued. gcode.run_script serializes
         the handler behind the running command, so without this the event fires the instant
         the operation completes and starts a second, redundant preload. Suspension drops
         the edge rather than deferring it, which is the whole point.
@@ -2924,11 +2929,11 @@ class MmuController(MmuFilamentMovement):
 
 
     # On type-B MMUs the filament is permanently gripped by the gear so an idle lane
-    # doesn't need its driver energised. Disabling saves power/heat and Klipper
+    # doesn't need its driver energized. Disabling saves power/heat and Klipper
     # re-enables on the next move
 
     def disable_idle_gear_stepper(self, gate=None):
-        # No-op unless gate is a type-B lane. Leave a gear synced to extruder (printing) energised
+        # No-op unless gate is a type-B lane. Leave a gear synced to extruder (printing) energized
         if gate is None:
             gate = self.gate_selected
         if gate < 0:
@@ -2956,7 +2961,7 @@ class MmuController(MmuFilamentMovement):
                     drive.mmu_gear_stepper.do_enable(False)
                     disabled_any = True
         if disabled_any:
-            self.log_stepper("All type-B idle gear steppers de-energised")
+            self.log_stepper("All type-B idle gear steppers de-energized")
 
 
     def _random_failure(self):
@@ -3065,6 +3070,12 @@ class MmuController(MmuFilamentMovement):
             from_gate = self.gate_selected
             self.select_tool(tool)
             gate = self.ttg_map[tool] if tool >= 0 else self.gate_selected
+            if tool >= 0:
+                # The EndlessSpool test below needs an exact GATE_EMPTY, and gate_status is
+                # otherwise only corrected at bootup - a gate left GATE_UNKNOWN would skip
+                # the path and load an empty gate. Scoped to this gate; a no-op without
+                # gate sensors. Attributes are kept: the temperature is about to be used.
+                self.gate_maps.validate_gate_status([gate], clear_attributes=False)
             if self.gate_status[gate] == GATE_EMPTY:
                 if self.endless_spool_enabled and self.p.endless_spool_on_load:
                     next_gate, msg = self.gate_maps.get_next_endless_spool_gate(tool, gate)
@@ -3734,7 +3745,7 @@ class MmuController(MmuFilamentMovement):
         """
         True when 'unit's NFC reader should perform a deep read (read and parse the
         full tag contents, not just the UID). Per-unit master switch for all metadata
-        behaviour on that unit: parsing tag data, populating the local gate map from it,
+        behavior on that unit: parsing tag data, populating the local gate map from it,
         and (with the flags below) auto-creating a Spoolman spool. False for a None unit.
         """
         return unit is not None and bool(unit.p.nfc_deep_read)
@@ -3985,7 +3996,7 @@ class MmuWrapperResumeCommand(BaseCommand):
             self.mmu.log_always("Print is not paused. Resume ignored.")
             return
 
-        force_in_print = bool(gcmd.get_int('FORCE_IN_PRINT', 0, minval=0, maxval=1)) # Mimick in-print
+        force_in_print = bool(gcmd.get_int('FORCE_IN_PRINT', 0, minval=0, maxval=1)) # Mimic in-print
         try:
             self.mmu._clear_mmu_error_dialog()
             if self.mmu.is_mmu_paused_and_locked():

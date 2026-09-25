@@ -366,6 +366,29 @@ class TestEveryBootableProfile(unittest.TestCase):
         self.assertIn("requires require_bowden_move to be 0", str(cm.exception))
         self.assertEqual(unit.p.gate_homing_endstop, 'encoder')
 
+    def test_no_bowden_mode_rejects_shared_exit_preload_endstop(self):
+        """
+        MmuSensorManager aliases mmu_shared_exit to the extruder sensor on a no-bowden unit,
+        but only inside the per-gate map. _shared_gate_path_occupied resolves against the
+        global registry, where that alias does not exist - so a unit configured to preload
+        against the alias would run with the shared-path occupancy guard silently dead.
+        They are the same switch; the name that resolves is the one to use.
+        """
+        hh = self._check('3ms')
+        unit = hh.mmu.mmu_unit(0)
+
+        with self.assertRaises(Exception) as cm:
+            hh.run_gcode('MMU_TEST_CONFIG UNIT=0 gate_preload_endstop=mmu_shared_exit')
+        self.assertIn("gate_preload_endstop must be 'extruder'", str(cm.exception))
+        self.assertEqual(unit.p.gate_preload_endstop, 'extruder')
+
+        # Every other choice is still free, and the restriction is tied to no-bowden only.
+        hh.run_gcode('MMU_TEST_CONFIG UNIT=0 gate_preload_endstop=extruder')
+        self.assertEqual(unit.p.gate_preload_endstop, 'extruder')
+        unit.require_bowden_move = True
+        hh.run_gcode('MMU_TEST_CONFIG UNIT=0 gate_preload_endstop=mmu_shared_exit')
+        self.assertEqual(unit.p.gate_preload_endstop, 'mmu_shared_exit')
+
     def test_bowden_homing_buffers_reject_negative_config(self):
         from test.hh import profiles
 
@@ -490,6 +513,13 @@ class TestEveryBootableProfile(unittest.TestCase):
                 dict(parser.items('neopixel _unit0_gate%d_leds' % gate))['pin'],
                 'unit0_gate%d:PA4' % gate)
 
+        # The SLB routes exactly one hardware i2c bus (i2c2) to every gate MCU, and
+        # the board file offers it to the per-gate sensor by chipdef name.
+        for gate in range(5):
+            sensor = dict(parser.items('temperature_sensor unit0_Env%d' % gate))
+            self.assertEqual(sensor['i2c_mcu'], 'unit0_gate%d' % gate)
+            self.assertEqual(sensor['i2c_bus'], 'i2c2_PB10_PB11')
+
     def test_emu_ebb(self):
         hh = self._check('emu_ebb')
 
@@ -521,6 +551,10 @@ class TestEveryBootableProfile(unittest.TestCase):
             chain = dict(parser.items('neopixel _unit0_gate%d_leds' % gate))
             self.assertEqual(chain['pin'], 'unit0_gate%d:PD3' % gate)
             self.assertEqual(chain['chain_count'], '5')
+            # Same single-bus fact on the EBB: i2c3 carries the per-gate sensor.
+            sensor = dict(parser.items('temperature_sensor unit0_Env%d' % gate))
+            self.assertEqual(sensor['i2c_mcu'], 'unit0_gate%d' % gate)
+            self.assertEqual(sensor['i2c_bus'], 'i2c3_PB3_PB4')
         leds = dict(parser.items('mmu_leds unit0'))
         self.assertEqual(leds['entry_leds'], '')
         self.assertEqual(leds['exit_leds'], 'neopixel:_unit0_gate0_leds (1-5)')
@@ -601,6 +635,115 @@ class TestMachineNfcDefaults(unittest.TestCase):
         })
 
 
+class TestMachinePerGateI2cBus(unittest.TestCase):
+    """
+    Board files offer the per-gate i2c buses the board actually routes, by chipdef name,
+    to both per-gate i2c consumers (environment sensor and NFC reader). The feature
+    files carry no chipdef knowledge of their own.
+    """
+
+    def _nfc_profile(self, profile_name):
+        from test.hh import cfg, profiles
+        base = profiles.get(profile_name)
+        syms = dict(base.syms)
+        syms['MMU_HAS_NFC_READER'] = True
+        syms['MMU_HAS_PER_GATE_NFC_READERS'] = True
+        for gate in range(5):
+            syms['CHOICE_NFC_READER_TYPE_PN532_%d' % gate] = True
+        return base.derive('%s_per_gate_nfc_i2c' % profile_name, syms=syms)
+
+    def _check_gates(self, profile, expected_bus):
+        from test.hh import cfg, profiles
+        parser = cfg.assemble(cfg.render(profile))
+        for gate in range(5):
+            with self.subTest(gate=gate):
+                sensor = dict(parser.items('temperature_sensor unit0_Env%d' % gate))
+                self.assertEqual(sensor['i2c_mcu'], 'unit0_gate%d' % gate)
+                self.assertEqual(sensor['i2c_bus'], expected_bus)
+                reader = dict(parser.items('mmu_nfc_reader unit0_nfc%d' % gate))
+                self.assertEqual(reader['i2c_mcu'], 'unit0_gate%d' % gate)
+                self.assertEqual(reader['i2c_bus'], expected_bus)
+
+    def test_emu(self):
+        self._check_gates(self._nfc_profile('emu'), 'i2c2_PB10_PB11')
+
+    def test_emu_ebb(self):
+        self._check_gates(self._nfc_profile('emu_ebb'), 'i2c3_PB3_PB4')
+
+    def test_env_sensor_custom_bus_name(self):
+        from test.hh import cfg, profiles
+        base = profiles.get('emu')
+        syms = dict(base.syms)
+        syms['CHOICE_ENVIRONMENT_SENSOR_I2C_BUS_OTHER_0'] = True
+        syms['PARAM_ENVIRONMENT_SENSOR_I2C_BUS_0'] = 'i2c1_PB6_PB7'
+        parser = cfg.assemble(cfg.render(
+            base.derive('emu_env_custom_bus', syms=syms)))
+        self.assertEqual(
+            dict(parser.items('temperature_sensor unit0_Env0'))['i2c_bus'],
+            'i2c1_PB6_PB7')
+        self.assertEqual(
+            dict(parser.items('temperature_sensor unit0_Env1'))['i2c_bus'],
+            'i2c2_PB10_PB11')
+
+    def test_empty_custom_environment_bus_uses_hardware_default(self):
+        from test.hh import cfg, profiles
+        base = profiles.get('emu')
+        syms = dict(base.syms)
+        syms['CHOICE_ENVIRONMENT_SENSOR_I2C_BUS_OTHER_0'] = True
+        syms['PARAM_ENVIRONMENT_SENSOR_I2C_BUS_0'] = ''
+        parser = cfg.assemble(cfg.render(
+            base.derive('emu_env_default_bus', syms=syms)))
+        sensor = dict(parser.items('temperature_sensor unit0_Env0'))
+        self.assertNotIn('i2c_bus', sensor)
+        self.assertNotIn('i2c_software_scl_pin', sensor)
+        self.assertNotIn('i2c_software_sda_pin', sensor)
+
+    def test_software_environment_pins_still_render(self):
+        from test.hh import cfg, profiles
+        base = profiles.get('emu')
+        syms = dict(base.syms)
+        syms['CHOICE_ENVIRONMENT_SENSOR_I2C_SOFTWARE_0'] = True
+        syms['PIN_ENVIRONMENT_SENSOR_SCL_0'] = 'PB6'
+        syms['PIN_ENVIRONMENT_SENSOR_SDA_0'] = 'PB7'
+        parser = cfg.assemble(cfg.render(
+            base.derive('emu_env_software_bus', syms=syms)))
+        sensor = dict(parser.items('temperature_sensor unit0_Env0'))
+        self.assertNotIn('i2c_bus', sensor)
+        self.assertEqual(sensor['i2c_software_scl_pin'], 'unit0_gate0:PB6')
+        self.assertEqual(sensor['i2c_software_sda_pin'], 'unit0_gate0:PB7')
+
+    def test_nfc_reader_custom_bus_name(self):
+        from test.hh import cfg, profiles
+        base = self._nfc_profile('emu')
+        syms = dict(base.syms)
+        syms['CHOICE_NFC_READER_I2C_BUS_OTHER_0'] = True
+        syms['PARAM_NFC_READER_I2C_BUS_0'] = 'i2c1_PB6_PB7'
+        parser = cfg.assemble(cfg.render(
+            base.derive('emu_nfc_custom_bus', syms=syms)))
+        self.assertEqual(
+            dict(parser.items('mmu_nfc_reader unit0_nfc0'))['i2c_bus'],
+            'i2c1_PB6_PB7')
+        self.assertEqual(
+            dict(parser.items('mmu_nfc_reader unit0_nfc1'))['i2c_bus'],
+            'i2c2_PB10_PB11')
+
+    def test_bus_members_are_only_offered_by_the_selected_board(self):
+        """Members are declared in board files and depend on the board type."""
+        from test.hh import cfg, profiles
+        ebb = 'CHOICE_ENVIRONMENT_SENSOR_I2C_BUS_EBB_I2C3_PB3_PB4_0'
+        slb = 'CHOICE_ENVIRONMENT_SENSOR_I2C_BUS_SLB_I2C2_PB10_PB11_0'
+        for label, (offered, withheld) in {
+            'emu': (slb, ebb),
+            'emu_ebb': (ebb, slb),
+        }.items():
+            with self.subTest(machine=label):
+                with cfg._env(cfg._SINGLE_UNIT_ENV):
+                    kc = cfg._kconfig('%s_i2c_bus_members' % label,
+                                      profiles.get(label).syms)
+                self.assertGreater(kc.syms[offered].visibility, 0)
+                self.assertEqual(kc.syms[withheld].visibility, 0)
+
+
 class TestMultiUnitMachine(unittest.TestCase):
     """
     `ercf_vvd` is the only profile with two units, so everything here is unreachable
@@ -650,7 +793,7 @@ class TestMultiUnitMachine(unittest.TestCase):
         """
         IndexedSelector marks itself homed and calibrated at handle_ready
         (mmu_indexed_selector.py:137-140) - "design doesn't need homing or calibration".
-        Its LinearServoSelector neighbour does NOT, so this asserts the two coexist.
+        Its LinearServoSelector neighbor does NOT, so this asserts the two coexist.
         """
         by_name = {u.name: u for u in self.hh.mmu.mmu_machine.units}
         self.assertTrue(by_name['unit1'].selector.is_homed)
@@ -745,7 +888,7 @@ class TestProportionalBufferSensor(unittest.TestCase):
     """
     EMU's analog buffer sensor - the only place a shipped profile exercises the ADC path.
 
-    A proportional sensor reports a normalised value in [-1.0, +1.0] and DERIVES the
+    A proportional sensor reports a normalized value in [-1.0, +1.0] and DERIVES the
     virtual filament_compression / filament_tension sensors from it by threshold, rather
     than reading switches. Those derived sensors have no switch_pin at all, which is what
     made this profile fail to load before the harness learned to dispatch by sensor kind.
@@ -824,7 +967,7 @@ class TestProportionalVirtualSensorThresholds(unittest.TestCase):
         self.hh.close()
 
     def feed_normalised(self, value):
-        """Feed a raw reading that normalises to `value` in [-1, +1]."""
+        """Feed a raw reading that normalizes to `value` in [-1, +1]."""
         span = self.sensor._d_pos if value >= 0 else self.sensor._d_neg
         self.prop.feed(self.sensor._neutral_point + value * span)
         return self.sensor.value

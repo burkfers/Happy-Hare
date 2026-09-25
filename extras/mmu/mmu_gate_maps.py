@@ -209,7 +209,9 @@ class MmuGateMaps:
 # RUNOUT, ENDLESS SPOOL, TTG MAPPING and GATE HANDLING
 # -----------------------------------------------------------------------------------------------------------
 
-    def get_next_endless_spool_gate(self, tool, gate):
+    # exclude_gates lets a caller rule out gates it has already found wanting, whatever
+    # the map says about them.
+    def get_next_endless_spool_gate(self, tool, gate, exclude_gates=()):
         group = self.endless_spool_groups[gate]
         next_gate = -1
         checked_gates = []
@@ -217,7 +219,7 @@ class MmuGateMaps:
             check = (gate + i + 1) % self.num_gates
             if self.endless_spool_groups[check] == group:
                 checked_gates.append(check)
-                if self.gate_status[check] != GATE_EMPTY:
+                if check not in exclude_gates and self.gate_status[check] != GATE_EMPTY:
                     next_gate = check
                     break
         alt_gates = "(checked gates: %s)" % ",".join(map(str, checked_gates))
@@ -227,21 +229,28 @@ class MmuGateMaps:
 
     # Use mmu entry (and gear) sensors to "correct" gate status
     # Return updated gate_status adjusted by sensor readings
-    def validate_gate_status(self, gates=None):
+    #
+    # clear_attributes=False keeps the gate's material/color/temperature/spool_id when a
+    # sensor correction makes it EMPTY: an empty lane is not an ejected one, and a caller
+    # may be about to use those. reset_gate() is a real ejection and always clears.
+    def validate_gate_status(self, gates=None, clear_attributes=True):
         v_gate_status = list(self.gate_status) # Ensure that webhooks sees get_status() change
         gates = range(self.num_gates) if gates is None else gates
         for gate in gates:
             status = v_gate_status[gate]
             gear_detected = self.mmu.sensor_manager.check_gate_sensor(SENSOR_EXIT_PREFIX, gate)
             if gear_detected is True:
-                v_gate_status[gate] = GATE_AVAILABLE
+                # The sensor proves filament is present, not where it came from, so
+                # GATE_AVAILABLE_FROM_BUFFER must survive - it selects the buffer speed
+                # and accel for the load.
+                v_gate_status[gate] = max(status, GATE_AVAILABLE)
             else:
                 pre_detected = self.mmu.sensor_manager.check_gate_sensor(SENSOR_ENTRY_PREFIX, gate)
                 if pre_detected is True and status == GATE_EMPTY:
                     v_gate_status[gate] = GATE_UNKNOWN
                 elif pre_detected is False and status != GATE_EMPTY:
                     v_gate_status[gate] = GATE_EMPTY
-            if status != GATE_EMPTY and v_gate_status[gate] == GATE_EMPTY:
+            if clear_attributes and status != GATE_EMPTY and v_gate_status[gate] == GATE_EMPTY:
                 self.clear_gate_attributes(gate)
         self.gate_status = v_gate_status
 
@@ -300,18 +309,20 @@ class MmuGateMaps:
         self.persist_endless_spool()
 
 
-    def set_gate_status(self, gate, state):
+    # clear_attributes=False keeps spool identity when only a sensor reports the lane
+    # empty. The default clears, and unassigns the spool in Spoolman.
+    def set_gate_status(self, gate, state, clear_attributes=True):
         if 0 <= gate < self.num_gates:
             if state != self.gate_status[gate]:
                 self.gate_status = list(self.gate_status) # Ensure that webhooks sees get_status() change
-                if state == GATE_EMPTY:
+                if state == GATE_EMPTY and clear_attributes:
                     self.clear_gate_attributes(gate)
                 self.gate_status[gate] = state
                 if state == GATE_EMPTY:
                     self.update_gate_color_rgb()
                     self.persist_gate_map(
                         spoolman_sync=True,
-                        gate_ids=[(gate, -1)],
+                        gate_ids=[(gate, self.gate_spool_id[gate])],
                         changed_gate=gate
                     )
                     return
@@ -388,7 +399,7 @@ class MmuGateMaps:
         """
         Set per-gate filament attributes from a scanned NFC/RFID tag (local only;
         does NOT touch spool_id - a resolved Spoolman spool remains the source of
-        truth). Attributes passed as None are left unchanged. Validates/normalises
+        truth). Attributes passed as None are left unchanged. Validates/normalizes
         color, persists, and refreshes derived state (RGB/LEDs/t-macros).
         """
         if not (0 <= gate < self.num_gates):
@@ -633,7 +644,6 @@ class MmuGateMaps:
         """
         Format per-gate filament details into a readable summary.
         """
-        msg = "Gates / Filaments:" # String used to filter in KlipperScreen-HH
         available_status = {
             GATE_AVAILABLE_FROM_BUFFER: "Buffered",
             GATE_AVAILABLE: "On spool",
@@ -641,6 +651,7 @@ class MmuGateMaps:
             GATE_UNKNOWN: "Unknown"
         }
 
+        rows = []
         for g in range(self.num_gates):
             available = available_status[self.gate_status[g]]
             name = self.gate_filament_name[g] or "Unknown"
@@ -657,11 +668,10 @@ class MmuGateMaps:
             tools = ",".join("T{}".format(t) for t in range(self.num_gates) if self.ttg_map[t] == g)
             tools_fstr = (" [{}]".format(tools) if tools else "")
             gate_fstr = "{}".format(g).ljust(2, UI_SPACE)
-            gate_fstr = "{}({}){}:".format(gate_fstr, filament_char, tools_fstr).ljust(14 + len(filament_char), UI_SPACE)
+            gate_fstr = "{}({}){}:".format(gate_fstr, filament_char, tools_fstr)
 
             available_fstr = "{};".format(available).ljust(11, UI_SPACE)
-            material_fstr = material.ljust(5, UI_SPACE)
-            fil_fstr = "{} | {}{}C | {} | {}".format(material_fstr, temperature, UI_DEGREE, color, name)
+            temperature_fstr = "{}{}C".format(temperature, UI_DEGREE)
             rfid = (self.gate_spool_rfid[g] or "").upper()
             rfid_fstr = "({});".format(rfid).ljust(12, UI_SPACE) if rfid else ""
 
@@ -681,7 +691,28 @@ class MmuGateMaps:
                 rfids = ','.join(self.gate_spool_rfid_aliases[g]) or "none"
                 extra_fstr += " [RFIDS: {}]".format(rfids)
 
-            msg += "\n{}{}{}{}{}{}".format(gate_fstr, available_fstr, spool_fstr, fil_fstr, speed_fstr, extra_fstr)
+            rows.append((gate_fstr, available_fstr, spool_fstr, material, temperature_fstr, color, name + speed_fstr + extra_fstr))
+
+        # Size columns from visible text: swatch color tokens occupy no console space.
+        def visible_length(value):
+            return len(re.sub(r"\{\{[^{}]*\}\}", "", value))
+
+        spool_header = "Spoolman" if self.p.spoolman_support != SPOOLMAN_OFF else ""
+        if any(self.gate_spool_rfid):
+            spool_header = "Spoolman / RFID" if spool_header else "RFID"
+        headers = ("Gate", "", spool_header, "Material", "", "Color", "Filament")
+        widths = [max([len(header)] + [visible_length(row[i]) for row in rows]) for i, header in enumerate(headers)]
+        widths[0] = max(widths[0] + 2, 17)
+        if spool_header:
+            widths[2] = max(widths[2], len(spool_header) + 2)
+
+        def format_row(row):
+            cells = [value + UI_SPACE * (widths[i] - visible_length(value)) for i, value in enumerate(row[:-1])]
+            return "{}{}{}{} | {} | {} | {}".format(*cells, row[-1])
+
+        msg = "Gates / Filaments:" # String used to filter in KlipperScreen-HH
+        msg += "\n" + format_row(headers)
+        msg += "".join("\n" + format_row(row) for row in rows)
         return msg
 
 
@@ -772,7 +803,7 @@ class MmuGateMaps:
                                 if distance > 0.5:
                                     warnings.append("Color matching is significantly different ! %s" % (UI_EMOTICONS[7] if t == 'emoticon' else ''))
                                 elif distance > 0.2:
-                                    warnings.append("Color matching might be noticebly different %s" % (UI_EMOTICONS[5] if t == 'emoticon' else ''))
+                                    warnings.append("Color matching might be noticeably different %s" % (UI_EMOTICONS[5] if t == 'emoticon' else ''))
                                 elif distance > 0.05:
                                     warnings.append("Color matching seems quite good %s" % (UI_EMOTICONS[3] if t == 'emoticon' else ''))
                                 elif distance > 0.02:
