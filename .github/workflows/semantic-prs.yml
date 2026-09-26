@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check PR Title Prefix
+        id: pr-title
         uses: amannn/action-semantic-pull-request@v5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -25,3 +26,22 @@ jobs:
             fix
             chore
             docs
+
+      # The action's message only lands in the log, so surface it in the run
+      # summary where it's readable without digging through step output. The
+      # message embeds the PR title, so it goes through env rather than being
+      # interpolated into this script.
+      - name: Explain the result
+        if: always()
+        env:
+          MESSAGE: ${{ steps.pr-title.outputs.error_message }}
+        run: |
+          {
+            echo "## PR title check"
+            echo
+            if [ -n "$MESSAGE" ]; then
+              echo "$MESSAGE"
+            else
+              echo "Title is valid."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
