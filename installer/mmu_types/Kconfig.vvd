@@ -10,12 +10,12 @@ config MMU_TYPE_VVD_1_0
   select MMU_HAS_NFC_READER
   select MMU_HAS_PER_GATE_NFC_READERS
   select UNSELECT_MMU_HAS_ESPOOLER        # Disable
+  select MMU_GEAR_ROTATES_SPOOL           # Gate gear motor turns the spool
   select UNSELECT_MMU_HAS_FILAMENT_BUFFER # Disable
 
   select UNSELECT_VARIABLE_BOWDEN_LENGTHS # Disable
   select UNSELECT_FILAMENT_ALWAYS_GRIPPED # Disable
 
-  select DISABLE_NUM_GATES_OPTION         # Disable
   imply OPTION_VVD_BUFFER                 # Suggest
 
 
@@ -61,9 +61,6 @@ if MMU_TYPE_VVD_1_0
   config CUSTOM_NFC_READER_SETUP
     def_bool y
 
-  if SHOW_MMU_ADDITIONS_WITH_TYPE
-    source "Kconfig.mmu_additions"
-  endif
 
   source "Kconfig.capabilities"
 
@@ -76,6 +73,8 @@ if MMU_TYPE_VVD_1_0
   config PARAM_VERSION
     default "1.0" 
   config PARAM_NUM_GATES
+    default 4
+  config PARAM_DESIGN_NUM_GATES
     default 4
   choice BOARD_TYPE
     default BOARD_TYPE_VVD_1_0

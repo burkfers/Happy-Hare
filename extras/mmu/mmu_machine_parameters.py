@@ -78,7 +78,7 @@ class MmuMachineParameters(TunableParametersBase):
         ParamSpec('unload_sequence_macro',         'str',   '_MMU_UNLOAD_SEQUENCE',    section="MACROS", hidden=True),
         ParamSpec('load_sequence_macro',           'str',   '_MMU_LOAD_SEQUENCE',      section="MACROS", hidden=True),
 
-        # These macros are not currently exposed but provide future flexability
+        # These macros are not currently exposed but provide future flexibility
         ParamSpec('error_dialog_macro',            'str',   '_MMU_ERROR_DIALOG',       section="MACROS", hidden=True),
         ParamSpec('error_macro',                   'str',   '_MMU_ERROR',              section="MACROS", hidden=True),
         ParamSpec('toolhead_homing_macro',         'str',   '_MMU_AUTO_HOME',          section="MACROS", hidden=True),
@@ -93,6 +93,10 @@ class MmuMachineParameters(TunableParametersBase):
         ParamSpec('default_gate_filament_name',    'list',    [], section="DEFAULT MAPS", hidden=True),
         ParamSpec('default_gate_material',         'list',    [], section="DEFAULT MAPS", hidden=True),
         ParamSpec('default_gate_vendor',           'list',    [], section="DEFAULT MAPS", hidden=True),
+        # Unset is None (never measured), which a floatlist can't express, so a
+        # configured default has to cover every gate
+        ParamSpec('default_gate_td',               'floatlist', [], section="DEFAULT MAPS", hidden=True),
+        ParamSpec('default_gate_td1_color',        'list',    [], section="DEFAULT MAPS", hidden=True),
         ParamSpec('default_gate_color',            'list',    [], section="DEFAULT MAPS", hidden=True),
         ParamSpec('default_gate_temperature',      'intlist', [], section="DEFAULT MAPS", hidden=True),
         ParamSpec('default_gate_spool_id',         'intlist', [], section="DEFAULT MAPS", hidden=True),
@@ -192,6 +196,8 @@ class MmuMachineParameters(TunableParametersBase):
         self.default_gate_filament_name   = list(self.default_gate_filament_name)
         self.default_gate_material        = list(self.default_gate_material)
         self.default_gate_vendor          = list(self.default_gate_vendor)
+        self.default_gate_td              = list(self.default_gate_td)
+        self.default_gate_td1_color       = list(self.default_gate_td1_color)
         self.default_gate_color           = list(self.default_gate_color)
         self.default_gate_temperature     = list(self.default_gate_temperature)
         self.default_gate_spool_id        = list(self.default_gate_spool_id)

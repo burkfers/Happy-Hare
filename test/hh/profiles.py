@@ -183,6 +183,19 @@ NFC_PER_GATE = BOXTURTLE_TEST.derive(
     syms={'MMU_HAS_NFC_READER': True, 'MMU_HAS_PER_GATE_NFC_READERS': True},
     description='BoxTurtle + per-gate NFC readers')
 
+# Per-gate readers with gate 2 switched OFF at the menuconfig toggle while its reader NAME
+# is left behind, which is what a real .mmu_config looks like after someone edits the name
+# and later deselects the gate: PARAM_NFC_READER_GATE_2 only hides the prompt, and
+# installer/build.py reads the raw user_value regardless of visibility, so the stale name
+# survives. The template used to render it anyway - gate 2 got a reader it had been told
+# not to have. Deliberately does NOT clear PARAM_NFC_READER_2: clearing it is exactly what
+# hides the bug. A sibling of NFC_PER_GATE rather than a change to it, because the neighbor
+# and scan suites need all four gates populated.
+NFC_PER_GATE_SPARSE = NFC_PER_GATE.derive(
+    'nfc_per_gate_sparse',
+    syms={'PARAM_NFC_READER_GATE_2': False, 'PARAM_NFC_READER_2': 'unit0_nfc2'},
+    description='BoxTurtle + per-gate NFC readers, gate 2 switched off (stale name kept)')
+
 # Per-gate readers with NFC neighbor-field CHECKING switched on (no eviction motion): a tag
 # positively registered to a neighboring gate is refused rather than attributed, but nothing
 # is jogged. This is the "fast-fail" half of the feature (MmuNfcFieldArbiter), reachable with
@@ -201,6 +214,63 @@ NFC_NEIGHBOR_EVICT = NFC_PER_GATE.derive(
     'nfc_neighbor_evict',
     syms={'PARAM_NFC_NEIGHBOR_EVICT_DISTANCE': '-40'},
     description='BoxTurtle + per-gate NFC readers, neighbor eviction enabled (backward jog)')
+
+# BoxTurtle + one TD-1 scanner serving every gate on the unit.
+#
+# TD-1 is the odd one out among the optional features: the scanner is a USB device owned
+# by Moonraker's [td1] component, so there are no pins, no bus and no klipper section.
+# MMU_HAS_TD1 renders a serial on [mmu_unit] and the capture policy on
+# [mmu_unit_parameters]; there is no scan geometry, so that is the whole of the setup.
+TD1_SHARED = BOXTURTLE_TEST.derive(
+    'td1_shared',
+    syms={'MMU_HAS_TD1': True, 'PARAM_TD1_BOWDEN_DEVICE': 'TD1-0042'},
+    description='BoxTurtle + one TD-1 scanner in the shared bowden')
+
+# The other topology: a scanner filament never passes through, that you present filament
+# to by hand. Its readings are staged as pending for the next gate preloaded, exactly as
+# a shared NFC reader's tag is - so it needs no gate assignment at all.
+TD1_OFFPATH = BOXTURTLE_TEST.derive(
+    'td1_offpath',
+    syms={'MMU_HAS_TD1': True, 'MMU_HAS_OFFPATH_TD1': True,
+          'PARAM_TD1_DEVICE': 'TD1-0099'},
+    description='BoxTurtle + an off-path TD-1 you present filament to')
+
+# Both at once, as the NFC readers allow
+TD1_BOTH = BOXTURTLE_TEST.derive(
+    'td1_both',
+    syms={'MMU_HAS_TD1': True, 'PARAM_TD1_BOWDEN_DEVICE': 'TD1-0042',
+          'MMU_HAS_OFFPATH_TD1': True, 'PARAM_TD1_DEVICE': 'TD1-0099'},
+    description='BoxTurtle + a bowden TD-1 and an off-path one')
+
+# One scanner per gate, with gate 2 deliberately left without one: the per-gate list has
+# to carry a placeholder for that gate so the list index stays the local gate number.
+#
+# Gate 2 keeps a serial ON PURPOSE. Switching a gate's scanner off only hides the prompt
+# and kconfig keeps the hidden value, so this is what changing your mind leaves behind -
+# the template has to render the entry blank regardless.
+TD1_PER_GATE = BOXTURTLE_TEST.derive(
+    'td1_per_gate',
+    syms={'MMU_HAS_TD1': True, 'MMU_HAS_PER_GATE_TD1': True,
+          'PARAM_TD1_DEVICE_0': 'TD1-0042', 'PARAM_TD1_DEVICE_1': 'TD1-0043',
+          'PARAM_TD1_DEVICE_GATE_2': False, 'PARAM_TD1_DEVICE_2': 'TD1-0099',
+          'PARAM_TD1_DEVICE_3': 'TD1-0042'},
+    description='BoxTurtle + per-gate TD-1 scanners (gate 2 unassigned)')
+
+# The feature switched on and nothing filled in - what you get by ticking the box in
+# menuconfig and moving on. Must render no assignment at all rather than an empty one,
+# which klipper rejects at boot.
+TD1_UNCONFIGURED = BOXTURTLE_TEST.derive(
+    'td1_unconfigured',
+    syms={'MMU_HAS_TD1': True},
+    description='BoxTurtle + TD-1 enabled but no scanner serial entered')
+
+# Both capture policies on, plus a non-default measurement wait.
+TD1_ADVANCED = TD1_PER_GATE.derive(
+    'td1_advanced',
+    syms={'PARAM_TD1_CAPTURE_TIMEOUT': '8',
+          'PARAM_TD1_AUTO_UPDATE': True,
+          'PARAM_TD1_CAPTURE_ON_LOAD': True},
+    description='BoxTurtle + per-gate TD-1 scanners, automatic capture enabled')
 
 # Per-gate readers with the self-jog ratification escalation switched on for MMU_NFC_SCAN,
 # independent of neighbor eviction above (nfc_neighbor_evict_distance stays 0 here) - a
@@ -553,6 +623,9 @@ ERCF_VVD = Profile(
         # the happy path. NFC_SPOOLMAN covers push.
         'CHOICE_SPOOLMAN_SUPPORT_RO': True,
         'PARAM_SPOOLMAN_NFC_AUTO_CREATE': True,
+        # Longer than the 20s default: this is the window to walk from the bench
+        # scanner/reader to the printer and preload a gate
+        'PARAM_SPOOLMAN_PENDING_ID_TIMEOUT': 30,
         'CHOICE_LOG_FILE_LEVEL_STEPPER': True,
         # Both default y (macro_vars/Kconfig.software:30,41); turned off on this machine, so
         # mmu_macro_vars.cfg gets check_gates/load_initial_tool = False at print start.
@@ -606,6 +679,12 @@ ERCF_VVD = Profile(
             'MMU_HAS_COMMON_NFC_READER': True,
             'CHOICE_NFC_READER_TYPE_PN532_UART': True,
             'PARAM_NFC_READER_SERIAL': '/dev/serial/shared_nfc',
+            # An off-path TD-1, beside the shared NFC reader above and used the same
+            # way: present a spool by hand and the reading is staged for the next gate
+            # preloaded. No gate assignment, no scan geometry. unit1 has an in-path one
+            'MMU_HAS_TD1': True,
+            'MMU_HAS_OFFPATH_TD1': True,
+            'PARAM_TD1_DEVICE': 'TD1-BENCH',
         }),
         # ViViD 1.0. Its buffer lives on a SECOND mcu (OPTION_VVD_BUFFER selects
         # MMU_HAS_BUFFER_MCU), so this unit alone renders two [mcu] sections.
@@ -620,6 +699,12 @@ ERCF_VVD = Profile(
             'PIN_EJECT_BUTTON_1': 'unit1:pin1',
             'PIN_EJECT_BUTTON_2': 'unit1:pin2',
             'PIN_EJECT_BUTTON_3': 'unit1:pin3',
+            # An in-path TD-1 in this unit's shared bowden - the other topology, so
+            # one machine carries both. Without MMU_HAS_PER_GATE_TD1 the template
+            # renders the serial once per gate, which is how one scanner serving every
+            # gate is expressed, and is what the attribution debt exists for
+            'MMU_HAS_TD1': True,
+            'PARAM_TD1_BOWDEN_DEVICE': 'TD1-VVD',
         }),
     ],
     description='ERCF 1.1sb (9 gates) + ViViD 1.0 (4 gates) - the only multi-unit profile')
@@ -685,11 +770,13 @@ run_current: 0.6
 # deliberately absent: one is synthetic and the other needs EXTRA_EXTRUDER_STUB.
 CONSOLE_PROFILES = (ERCF_VVD, BOXTURTLE, TRADRACK, THREE_MS, CHAMELEON, PICO_MMU, MMX, KMS, QIDI,
                     EMU, EMU_EBB, ENCODER,
-                    NFC_SINGLE, NFC_PER_GATE, NFC_NEIGHBOR_CHECK, NFC_NEIGHBOR_EVICT,
-                    NFC_GATE_CLEAR,
+                    NFC_SINGLE, NFC_PER_GATE, NFC_PER_GATE_SPARSE, NFC_NEIGHBOR_CHECK,
+                    NFC_NEIGHBOR_EVICT, NFC_GATE_CLEAR,
                     NFC_PN5180, NFC_PN5180_PER_GATE, NFC_PN532, NFC_PN532_SW_I2C,
                     NFC_PN532_UART, NFC_PN532_UART_PER_GATE,
-                    NFC_SPOOLMAN, NFC_SPOOLMAN_SHARED)
+                    NFC_SPOOLMAN, NFC_SPOOLMAN_SHARED,
+                    TD1_SHARED, TD1_PER_GATE, TD1_ADVANCED, TD1_UNCONFIGURED,
+                    TD1_OFFPATH, TD1_BOTH)
 
 PROFILES = {p.name: p for p in CONSOLE_PROFILES +
             (BOXTURTLE_TEST, ERCF_VVD_BUFFERS, ERCF_VVD_DUAL_EXTRUDER)}

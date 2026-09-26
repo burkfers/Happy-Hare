@@ -48,6 +48,7 @@ from .unit.selectors.mmu_base_selectors import VirtualSelector
 from .unit.mmu_environment_manager      import MmuEnvironmentManager
 from .unit.mmu_fan_manager              import MmuFanManager
 from .unit.mmu_nfc_manager              import MmuNfcManager
+from .unit.mmu_td1_manager              import MmuTd1Manager
 from .mmu_utils                         import MmuError
 
 
@@ -99,6 +100,7 @@ class MmuUnit:
             filament_always_gripped: bool = False    # Is filament always gripped by MMU (overrides gear/extruder syncing assumptions)
             show_bypass: bool = False                # Does design has selectable filament bypass (only type-A and type-C). Only one allowed per mmu_machine!
             filament_buffer: bool = False            # Does design has buffer to catch loose filament on rewind (allows for faster loading speeds)
+            gear_rotates_spool: bool = False         # Can the gear motor itself turn the spool (type-B without an eSpooler)
 
         DEF_PROFILE = MmuUnitProfile()
 
@@ -114,11 +116,11 @@ class MmuUnit:
             VENDOR_QUATTRO_BOX:  replace(DEF_PROFILE, filament_always_gripped=True),
             VENDOR_MMX:          replace(DEF_PROFILE, selector_type=SELECTOR_SERVO),
             VENDOR_MMX6:         replace(DEF_PROFILE, selector_type=SELECTOR_ROTARY),
-            VENDOR_VVD:          replace(DEF_PROFILE, selector_type=SELECTOR_INDEXED, filament_always_gripped=True),
+            VENDOR_VVD:          replace(DEF_PROFILE, selector_type=SELECTOR_INDEXED, filament_always_gripped=True, gear_rotates_spool=True),
             VENDOR_KMS:          replace(DEF_PROFILE, filament_always_gripped=True),
             VENDOR_EMU:          replace(DEF_PROFILE, variable_bowden_lengths=True, filament_always_gripped=True),
             VENDOR_LOW_RIDER:    replace(DEF_PROFILE, selector_type=SELECTOR_ROTARY),
-            VENDOR_QIDI:         replace(DEF_PROFILE, variable_rotation_distances=False, filament_always_gripped=True),
+            VENDOR_QIDI:         replace(DEF_PROFILE, variable_rotation_distances=False, filament_always_gripped=True, gear_rotates_spool=True),
         }
 
         if self.mmu_vendor == VENDOR_PRUSA:
@@ -134,6 +136,7 @@ class MmuUnit:
         self.filament_always_gripped =     bool(config.getint('filament_always_gripped', profile.filament_always_gripped))
         self.show_bypass =                 bool(config.getint('show_bypass', profile.show_bypass))
         self.filament_buffer =             bool(config.getint('filament_buffer', profile.filament_buffer))
+        self.gear_rotates_spool =          bool(config.getint('gear_rotates_spool', profile.gear_rotates_spool))
 
         # Can selector mechanism allow selection of other gates on unit when filament is loaded
         self.can_crossload = self.selector_type in [SELECTOR_VIRTUAL, SELECTOR_SERVO, SELECTOR_INDEXED, SELECTOR_MACRO, SELECTOR_ROTARY]
@@ -244,6 +247,43 @@ class MmuUnit:
         # enable/active state stays independent per gate. Adjacency is a hardware-layout
         # fact, not something validated here. See installer/boards/custom/Kconfig.vvd
         # for the in-tree example (the ViViD machine).
+
+
+        # ---------------------------------------------------------------------------------------------------
+        # Optional TD-1 filament measurement scanners
+        # ---------------------------------------------------------------------------------------------------
+
+        # USB devices owned by Moonraker's [td1] component, not klipper objects, so
+        # unlike NFC readers there is no section to validate - only serials to store.
+        #
+        # Same split as the NFC readers:
+        #   'td1_device'  - a scanner filament does NOT pass through, that you present
+        #                   filament to by hand. Its readings are staged as pending and
+        #                   applied to the next gate preloaded, like a shared tag read.
+        #   'td1_devices' - one entry per gate in local gate order, in the filament path.
+        #                   Repeat a serial for a scanner sitting in a shared part of the
+        #                   bowden; leave an entry blank for a gate with no scanner.
+        # Both are optional and any combination is possible.
+        self.td1_device = config.get('td1_device', '').strip()
+        self.td1_devices = [
+            name.strip() for name in config.getlist('td1_devices', [])
+        ]
+
+        # A blank entry means "no scanner on this gate", as in 'nfc_readers'. Reject a
+        # literal '-' rather than treat it as a serial that never connects
+        if any(name == '-' for name in self.td1_devices):
+            raise config.error(
+                "'td1_devices' uses a blank entry for a gate with no scanner, not '-' "
+                "(unit %s)" % self.name)
+
+        if config.get('td1_device', None) is not None and not self.td1_device:
+            raise config.error("'td1_device' requires a Moonraker TD-1 USB serial number")
+
+        if len(self.td1_devices) not in [0, self.num_gates]:
+            raise config.error("'td1_devices' must be empty or a comma separated list of 'num_gates' elements")
+
+        # A serial may repeat within 'td1_devices' and across units: one physical scanner
+        # can serve several gates or units, sharing one MmuTd1Device
 
 
         # ---------------------------------------------------------------------------------------------------
@@ -494,6 +534,10 @@ class MmuUnit:
         self.nfc_manager = MmuNfcManager(params, self, self.p)
         logging.info("MMU: Created: nfc manager for unit %s" % self.name)
 
+        # Create TD-1 manager
+        self.td1_manager = MmuTd1Manager(params, self, self.p)
+        logging.info("MMU: Created: td1 manager for unit %s" % self.name)
+
         self.subcomponents = [
             self.calibrator,
             self.toolhead_wrapper,
@@ -507,6 +551,7 @@ class MmuUnit:
             self.environment_manager,
             self.fan_manager,
             self.nfc_manager,
+            self.td1_manager,
         ]
 
 
@@ -706,6 +751,9 @@ class MmuUnit:
 
     def has_filament_buffer(self):
         return self.filament_buffer
+
+    def has_td1(self):
+        return bool(self.td1_device or any(self.td1_devices))
 
     def motors_onoff(self, on=False, motor="all"):
         if motor in ["all", "gear", "gears"]:
@@ -1003,5 +1051,13 @@ class MmuUnit:
         elif self.nfc_readers:
             # Per-gate NFC reader
             unit_info['nfc_readers'] = self.nfc_readers
+
+        if self.td1_device:
+            # Off-path TD-1 scanner, presented to by hand
+            unit_info['td1_device'] = self.td1_device
+
+        if self.td1_devices:
+            # Per-gate TD-1 scanners, in the filament path
+            unit_info['td1_devices'] = self.td1_devices
 
         return unit_info

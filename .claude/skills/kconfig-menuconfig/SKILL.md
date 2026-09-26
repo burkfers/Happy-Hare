@@ -57,16 +57,54 @@ Load-bearing facts about the flow:
   (`CONFIG_MULTI_UNIT`, `CONFIG_MMU_UNITS`, `CONFIG_KLIPPER_HOME`, ...)
   steers the build (e.g. `unit_names`). Renaming such a symbol is a Makefile
   change too.
-- **Staleness**: `kconfig_sources` (Makefile:244) = every `installer/**/Kconfig*`
-  plus `kconfigfunctions.py`, compared by mtime against the value file; when
+- **Staleness**: `kconfig_sources` (Makefile:252) = every `installer/**/Kconfig*`
+  plus `kconfigfunctions.py` and `kconfiglib.py`, compared by mtime against the value file
+  (a unit file is also compared against its top-level file, `KCONFIG_PARENT`); when
   stale, `olddefconfig` (never menuconfig) refreshes the file with new
   defaults. New `Kconfig*` files are picked up automatically by the wildcard;
   files with any other name are invisible to this mechanism.
-- **User values survive by design**: `olddefconfig` only fills in *new*
-  symbols' defaults; explicit user assignments in an existing `.mmu_config`
-  are preserved. This is why changing the *default or meaning of an existing*
-  symbol is a breaking change for installed machines (see CONTRIBUTING: such
-  changes "will probably be rejected").
+- **User values survive by design; recorded defaults do not**: explicit user
+  assignments in an existing `.mmu_config` are preserved, but a value saved
+  with `#~DEFAULT~#` (choices included) is recomputed by every `olddefconfig`
+  and menuconfig load. So changing the *default or meaning of an existing*
+  symbol or choice reaches installed machines that accepted it (see
+  CONTRIBUTING: such changes "will probably be rejected"). `olddefconfig.py`
+  prints every such change to stderr (`change_report`), which is what
+  `install.sh` shows under "Updating Kconfig defaults".
+- **Renaming a symbol discards the user's value unless it is in the rename
+  table.** kconfiglib drops an assignment whose symbol no longer exists,
+  `build.KConfig` runs with `warn_assign_undef = False`, and `Makefile` sends
+  `olddefconfig`'s output to `/dev/null` — so an unhandled rename loses the
+  old line with *zero* diagnostics and the new name takes its default.
+  `installer/upgrades.py` does not help: it renames options and sections in
+  the generated Klipper `.cfg` files, not Kconfig symbols.
+  **The hook is `HH_RENAMED_SYMBOLS`** in the kconfiglib fork (old name → new
+  name), applied by `Kconfig._migrate_renamed_symbols` during `load_config`.
+  Add an entry in the same commit as the rename; entries can be dropped a
+  major version later. Because it runs inside the loader, every caller gets
+  it (menuconfig, olddefconfig, `build.KConfig`, the test harness), per-unit
+  `.mmu_config_<unit>` files are covered for free, and there is no file
+  rewriting — so none of the mtime/glob/ordering hazards of a text pass apply.
+  Two things it must keep doing, both covered by
+  `test/installer/test_kconfig_rename_migration.py`:
+  - **Honour `filter_defaults`.** menuconfig/olddefconfig pass `True` and
+    clear a `#~DEFAULT~#` line; `build.py` passes `False` and applies it.
+    Treating them alike freezes an old default as a user value.
+  - **Handle `# CONFIG_X is not set`**, a different regex from `KEY=VALUE`,
+    and how a saved config records what was turned *off*.
+  **Its one limit:** it runs after `make` has done `-include $(KCONFIG_CONFIG)`
+  and after `install.sh` has sourced the same file as shell, so a symbol that
+  *those* read by name (`MULTI_UNIT`, `MMU_UNITS`, `KLIPPER_HOME`, …) still
+  cannot be renamed this way — that needs a pass that rewrites the file.
+- **A shared definition can be a component.** `installer/components/Kconfig.*`
+  is sourced once per consumer with `prefix := X` preprocessor variables, so
+  one definition generates `PARAM_X_…` for each. `installer/Kconfig.purging`
+  and `installer/components/Kconfig.tmc_driver_*` are the worked example.
+  Three rules: re-assign every variable immediately before each `source`
+  (they are global for the whole parse); keep declarations and prompts in
+  separate fragments, because `_propagate_deps` ANDs an enclosing `if` into
+  defaults as well as prompts; and pad prompts with `$(pad,width,text)`
+  rather than literal spaces.
 
 ## The symbol-naming contract
 
@@ -84,7 +122,7 @@ kconfiglib fork. Three prefix lists are hard-coded in different places and
 | `CHOICE_X` / `CHOICE_X_*` | Named choice "X" and its members |
 | `UNSELECT_*` | Force-off switch: a type/board does `select UNSELECT_X` to hide/disable feature X's prompt (`if !UNSELECT_X` in the Kconfig) |
 
-**The special-default behaviour**: symbols (and `CHOICE_`-named choices) whose
+**The special-default behavior**: symbols (and `CHOICE_`-named choices) whose
 name matches the list are written into `.mmu_config` with a trailing
 ` #~DEFAULT~#` magic token whenever they were *not* user-set (i.e. the saved
 value is just the computed default). On the next menuconfig/olddefconfig load
@@ -112,7 +150,7 @@ The three lists (verified anchors, will drift — re-grep):
 Note the three lists are *deliberately not identical* (e.g. `UNSELECT_` gets
 a default token but no `(NOT DEFAULT)` marker — it's a hidden switch the user
 isn't meant to fiddle with). Don't "simplify" them into one without deciding
-what the UI behaviour should be.
+what the UI behavior should be.
 
 **`VAR_*`** (macro variables) and **`PIN_*`** get the token but their *cfg*
 landing spot differs: `VAR_*` values are copied into `gcode_macro` sections
@@ -233,7 +271,7 @@ to avoid wrapping beyond that limit; put longer explanations in documentation.
      reached via `./install.sh -i`).
 7. **If you touched the fork itself** (`as_dict`, load/write, menuconfig):
    the tests for it are `make verify_pickle` (pickle consistency),
-   `make test UT=test_menuconfig.py` (menuconfig cursor behaviour), and
+   `make test UT=test_menuconfig.py` (menuconfig cursor behavior), and
    profile tests. The vendored base is kconfiglib **v14.1** — the HH patches
    are marked `# Happy Hare:` inline; if you re-sync upstream, that grep is
    your change list.

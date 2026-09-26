@@ -652,7 +652,7 @@ def build_config_file(cfg_file_basename, dest_file, kcfg, input_files, extra_par
         excluded_vars = []   # Don't filter out any existing macro variables
 
     elif refresh_mode == 'replace':
-        # Here we (re)create prestine cfg files based on kconfig settings
+        # Here we (re)create pristine cfg files based on kconfig settings
         pass
 
     elif refresh_mode == 'merge':
@@ -867,11 +867,6 @@ def get_current_version(hhcfg):
 def get_target_version():
     target_version = os.environ.get("HH_VERSION")
     return target_version
-
-
-def get_config_version(kcfg):
-    version = kcfg.get("HAPPY_HARE_VERSION")
-    return version
 
 
 def check_version(kconfig, input_files):

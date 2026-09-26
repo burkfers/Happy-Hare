@@ -105,7 +105,7 @@ class Session:
 
     def __init__(self, profile='boxturtle', adc_api='new', adc_payload='samples',
                  strict_gcode=False, printer_stub=PRINTER_STUB, virtual_nfc=False,
-                 log_dir=None, klipper_aio=True):
+                 log_dir=None, klipper_aio=True, kalico=False, old_klipper=False):
         self.klippy = install()
         self.profile = (profile if isinstance(profile, profiles_mod.Profile)
                         else profiles_mod.get(profile))
@@ -116,8 +116,14 @@ class Session:
         # where SAVE_VARIABLE goes through aio_executor and PAUSES the calling
         # greenlet, and where the klippy:ready dispatch loop runs inside
         # reactor.assert_no_pause(). False models everything before that: a plain
-        # synchronous write and no pause guard. Defaults to the modern behaviour.
+        # synchronous write and no pause guard. Defaults to the modern behavior.
         self.klipper_aio = klipper_aio
+        # Pre-motion_queuing generations (MmuStepper then emulates the module
+        # via MotionQueuingEmulator): kalico adds the is_kalico() marker on top
+        # of old_klipper
+        self.kalico = kalico
+        self.old_klipper = old_klipper
+        self._orig_chelper_get_ffi = None
         self.strict_gcode = strict_gcode
         self.printer_stub = printer_stub
         # Swap reader chips for model-driven virtual ones instead of scripting the real
@@ -138,6 +144,75 @@ class Session:
         self.moonraker = None           # set by attach_moonraker()
         self.moonraker_link = None
         self._booted = False
+
+    # -- pre-motion_queuing generation emulation ----------------------------
+    def _install_pre_motion_queuing(self, printer, kalico_marker=False):
+        """
+        Emulate a Klipper generation without klippy/extras/motion_queuing.py
+        (old mainline; Kalico when kalico_marker is set) before any section
+        loads: the is_kalico() marker object, the motion_queuing module
+        absent, and a pure-Python chelper ffi stand-in for the trapq surface
+        MotionQueuingEmulator uses (real old Klipper / Kalico use the compiled
+        chelper; the harness has no C build - see klippy_root/chelper.py). Step
+        generation itself is not modelled, exactly as in the mainline
+        generation: moves are observed through the same plain-move observer as
+        the fake motion_queuing, and the filament model remains the source of
+        truth.
+        """
+        if kalico_marker:
+            printer.add_object('danger_options', object())
+        printer.harness_missing_modules = {'motion_queuing'}
+        import chelper
+        self._orig_chelper_get_ffi = chelper.get_ffi
+        chelper.get_ffi = lambda: self._pre_motion_queuing_ffi(printer)
+        return self
+
+    def _install_legacy_manual_home(self, printer):
+        """
+        Pre-motion_queuing generations also predate manual_home's probe_pos
+        argument (and its trigger-position return): swap the fake
+        PrinterHoming's for the old signature, so do_homing_move's signature
+        introspection takes the HomingMove-direct path exactly as on those
+        Klipper versions. Must run after the toolhead phase: the homing object is
+        registered by the toolhead module as it loads.
+        """
+        from extras.homing import HomingMove
+        homing = printer.lookup_object('homing')
+
+        def legacy_manual_home(toolhead, endstops, movepos, speed,
+                               triggered, check_triggered):
+            hmove = HomingMove(printer, endstops, toolhead)
+            hmove.homing_move(movepos, speed, probe_pos=False,
+                              triggered=triggered, check_triggered=check_triggered)
+            return movepos
+        homing.manual_home = legacy_manual_home
+        return self
+
+    def _pre_motion_queuing_ffi(self, printer):
+        class _Trapq:
+            def __init__(self):
+                self.moves = []
+        class _Main:
+            def gc(self, obj, free_fn):
+                return obj
+        class _Lib:
+            def trapq_alloc(self):
+                return _Trapq()
+            def trapq_free(self, trapq):
+                pass
+            def trapq_finalize_moves(self, trapq, move_end, clear_time):
+                pass
+            def trapq_append(self, trapq, print_time, accel_t, cruise_t, decel_t,
+                             start_x, start_y, start_z, axis_x, axis_y, axis_z,
+                             start_v, cruise_v, accel):
+                trapq.moves.append(print_time)
+                # Same signed-distance arithmetic as the fake motion_queuing:
+                # plain moves are the only ones that reach trapq_append
+                distance = axis_x * cruise_v * (accel_t + cruise_t)
+                observer = getattr(printer, 'harness_pre_mq_move_observer', None)
+                if observer is not None and distance:
+                    observer(trapq, distance)
+        return _Main(), _Lib()
 
     # -- lifecycle ---------------------------------------------------------
     def __enter__(self):
@@ -160,6 +235,10 @@ class Session:
                 logger.shutdown()
         except Exception:
             logging.debug('logger shutdown failed', exc_info=True)
+        if self._orig_chelper_get_ffi is not None:
+            import chelper
+            chelper.get_ffi = self._orig_chelper_get_ffi
+            self._orig_chelper_get_ffi = None
         if self.reactor is not None:
             self.reactor.finalize()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -234,12 +313,14 @@ class Session:
         # Default of None matters - HH's own manually-parsed sections
         # ([mmu_unit], [mmu_sensors], [mmu_parameters], ...) have no load_config
         # module and must be skipped, exactly as in Klipper.
+        if self.kalico or self.old_klipper:
+            self._install_pre_motion_queuing(printer, kalico_marker=self.kalico)
         for section_config in self.config.get_prefix_sections(''):
             section = section_config.get_name()
             if section not in printer.objects:
                 printer.load_object(self.config, section, None)
 
-        # Both of these MUST happen before the readers are initialised: they are
+        # Both of these MUST happen before the readers are initialized: they are
         # constructed during the section loop above, but the chip is only talked to at
         # init, and a failed init is never retried - so doing either later leaves every
         # reader dead for the whole session. Init used to be at klippy:connect; it is now
@@ -288,6 +369,8 @@ class Session:
         import toolhead as toolhead_mod
         from kinematics import extruder as extruder_mod
         toolhead_mod.add_printer_objects(self.config)
+        if self.kalico or self.old_klipper:
+            self._install_legacy_manual_home(self.printer)
         extruder_mod.add_printer_objects(self.config)
         self.printer.send_event('klippy:connect')
         self.apply_initial_sensor_states()
@@ -360,7 +443,7 @@ class Session:
         # derive. Forcing the virtual sensors directly instead leaves them stuck: the
         # proportional sensor only re-evaluates them on a threshold crossing, so a
         # subsequently-fed neutral reading does not clear a hand-set tension flag - which
-        # showed up as EMU reading "tension" at a normalised value of 0.0.
+        # showed up as EMU reading "tension" at a normalized value of 0.0.
         derived = set()
         for name, sensor in self.sensors().items():
             handle = _SensorHandle(self, name, sensor)
@@ -805,6 +888,10 @@ class Session:
         if mq is not None:
             mq.move_observer = self._on_manual_move
             mq.toolhead_move_observer = self._on_toolhead_move
+        elif self.kalico or self.old_klipper:
+            # No motion_queuing to hook: the fake ffi's trapq_append consults
+            # this observer instead
+            self.printer.harness_pre_mq_move_observer = self._on_manual_move
         return self
 
     def _on_toolhead_move(self, distance):
@@ -825,7 +912,7 @@ class Session:
         (mmu.drive(gate) -> MmuDrive.driving_stepper()).
 
         Falls back to the gear stepper if either is missing, so the harness degrades to its
-        older behaviour against a checkout that predates them rather than advancing nothing.
+        older behavior against a checkout that predates them rather than advancing nothing.
         """
         drive = self.mmu.drive(gate) if hasattr(self.mmu, 'drive') else None
         driving = getattr(drive, 'driving_stepper', None)
@@ -862,7 +949,7 @@ class Session:
 
         Needed because a filament state change is a real event: putting filament at a
         gate trips the entry switch, which HH treats as an insert and responds to by
-        preloading that gate. Correct behaviour, but not what you want while arranging
+        preloading that gate. Correct behavior, but not what you want while arranging
         a starting position.
 
         Suppression uses min_event_systime = reactor.NEVER, which is exactly what
@@ -923,7 +1010,7 @@ class Session:
         return model
 
     # Plausible spool metadata for prime_gate_map(). Vendors and materials are real names a
-    # user would recognise, so the gate table, the LED filament_color render and the Spoolman
+    # user would recognize, so the gate table, the LED filament_color render and the Spoolman
     # paths all have something to show that is not "Unknown".
     FILAMENT_VENDORS = ('eSun', 'KVS', 'Bambu Labs', 'Prusa')
     FILAMENT_MATERIALS = ('ABS', 'ABS+', 'PLA', 'TPU', 'PLA+')
@@ -999,6 +1086,11 @@ class Session:
             hostname=hostname, **kwargs)
         self.moonraker.component_init()
         self.moonraker_link = MoonrakerLink(self, self.moonraker)
+        # Plug in every configured TD-1 serial, with nothing in front of the lens yet.
+        # One Moonraker never lists would read as disconnected
+        if getattr(self.mmu, 'td1', None) is not None:
+            self.moonraker.td1.attach(*self.mmu.td1.devices)
+            self.moonraker_link.enable_td1_bridge()
         self.moonraker_link.settle()
         return self.moonraker_link
 
@@ -1518,7 +1610,7 @@ class _SensorHandle:
 
     # -- proportional (ADC) sensors ----------------------------------------
     def neutral_value(self):
-        """The raw ADC reading meaning "no force" - normalises to 0.0."""
+        """The raw ADC reading meaning "no force" - normalizes to 0.0."""
         return getattr(self.sensor, '_neutral_point', 0.5)
 
     def _extreme_value(self):
@@ -1540,7 +1632,7 @@ class _SensorHandle:
 
     @property
     def value(self):
-        """Normalised [-1.0, 1.0] reading, for proportional sensors."""
+        """Normalized [-1.0, 1.0] reading, for proportional sensors."""
         return getattr(self.sensor, 'value', None)
 
     def clear(self, settle=True):
