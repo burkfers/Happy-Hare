@@ -143,10 +143,19 @@ class SaveVariableManager:
     def namespace(self, variable, namespace):
         """
         Return a variable name namespaced to an MMU unit (if provided).
+
+        Always lower case. mmu_vars.cfg is an INI file, so configparser's optionxform
+        folds every option name to lower case on write AND on read - and klipper's
+        SAVE_VARIABLE rejects an upper case name outright ("VARIABLE must not contain
+        upper case"). A unit name carrying capitals would otherwise be stored under one
+        spelling and looked up under another: the value would work for the rest of the
+        session (get() checks the journal first) and then come back missing on the next
+        boot. Folding here matches the file that is already on disk, so existing
+        values are picked up rather than orphaned.
         """
         if namespace is not None:
-            return variable.replace("mmu_", "mmu_%s_" % namespace)
-        return variable
+            return variable.replace("mmu_", "mmu_%s_" % namespace).lower()
+        return variable.lower()
 
 
     @staticmethod

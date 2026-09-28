@@ -243,7 +243,9 @@ if MULTI_UNIT_ENTRY_POINT
     prompt "MMU unit names"
     array_editor ","
     help
-      Comma-separated list of unit names. Careful: Use only alphanumeric characters.
+      Comma-separated list of unit names. Careful: Use only alphanumeric characters,
+      lower case (e.g. "kcm0" not "KCM0") - klipper case folds save_variables keys, so an
+      upper case name is stored as "mmu_kcm0_*" in mmu_vars.cfg and in the UI.
       If this is the first time configuring multi-unit from previous single-unit install
       then the first name must be unit0 because that is how it was configured.
       E.g. "unit0,unit1"
